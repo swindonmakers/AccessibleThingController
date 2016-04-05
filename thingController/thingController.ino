@@ -507,6 +507,9 @@ uint8_t queryServer(String cardID) {
        flags |= TOKEN_TRAINER;
      }
    }
+   
+   // close connection
+   client.stop();
 
    return flags;
 }
@@ -542,7 +545,9 @@ void sendLogMsg(String msg) {
                 "Host: " + host + "\r\n" +
                 "Connection: close\r\n\r\n");
 
-   // don't care if it succeeds, so return
+   // don't care if it succeeds, so close connection and return
+   client.flush();
+   client.stop();
    return;
 }
 
@@ -573,7 +578,9 @@ void sendTelegramMsg(String msg) {
                 "Host: " + TELEGRAM_HOST + "\r\n" +
                 "Connection: close\r\n\r\n");
 
-   // don't care if it succeeds, so return
+   // don't care if it succeeds, so close connection and return
+   client.flush();
+   client.stop();
    return;
 }
 
