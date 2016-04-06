@@ -26,9 +26,6 @@
  *  Enums
  * ========================================================================== */
 
-#define MODE_DOOR         0
-#define MODE_MACHINE      1
-
 /* ========================================================================== *
  *  Configuration
  * ========================================================================== */
@@ -37,11 +34,14 @@
 #define EEPROM_MAGIC      2  // update to clear EEPROM on restart
 #define THING_ID          "1A9E3D66-E90F-11E5-83C1-1E346D398B53"
 #define THING_NAME        "DOOR"
-#define CONTROL_MODE      MODE_DOOR
+#define CONTROL_ALLOWED_MODE      OUTPUT
+#define CONTROL_ALLOWED_VALUE     LOW
+#define CONTROL_DISALLOWED_MODE   OUTPUT
+#define CONTROL_DISALLOWED_VALUE  HIGH
 //#define NETWORK_SSID      "PI_Guest"
 //#define NETWORK_PASSWORD  "@Trop1cana@"
-#define NETWORK_SSID      "virginmedia4958657"
-#define NETWORK_PASSWORD  "vmdkjyka"
+#define NETWORK_SSID      "desert-island-2g"
+#define NETWORK_PASSWORD  "messageinabottle"
 #define SERVER_HOST       "desert-island.me.uk"
 #define SERVER_PORT       80
 #define SERVER_URLPREFIX  "/accesssystem/"
@@ -80,7 +80,7 @@
   */
 
 // tokens are 4 or 7-byte values, held in a fixed 7-byte array
-typedef uint8_t TOKEN[7];
+typedef  uint8_t TOKEN[7];
 
 // flags for TOKEN_CACHE_ITEM
 #define TOKEN_ACCESS    0x01
@@ -94,8 +94,8 @@ struct TOKEN_CACHE_ITEM {
     uint8_t flags;    // permission bits
     uint16_t count;   // scan count
     uint8_t sync;     // countdown to resync with cache with server
-}; 
-// stored size = 9 bytes
+};
+// stored size = 12 bytes
 
 
 /* ========================================================================== *
@@ -217,29 +217,30 @@ void displayUptime() {
 // in machine mode: true = powered, false = unpowered
 
 // duration in milliseconds
-void enableOutput(unsigned long duration) {
-  // TODO: sort inversion for diff modes
-  Serial.println("Output enabled");
-  digitalWrite(OUTPUT_PIN, HIGH);
+void allowedOutput(unsigned long duration) {
+  Serial.println("+++ Output allowed");
+  pinMode(OUTPUT_PIN, CONTROL_ALLOWED_MODE);
+  digitalWrite(OUTPUT_PIN, CONTROL_ALLOWED_VALUE);
   outputEnableTimer = millis() + duration;
 }
 
-void disableOutput() {
-  // TODO: sort inversion for diff modes
-  Serial.println("Output disabled");
-  digitalWrite(OUTPUT_PIN, LOW);
+void disallowedOutput() {
+  Serial.println("--- Output disallowed");
+  pinMode(OUTPUT_PIN, CONTROL_DISALLOWED_MODE);
+  digitalWrite(OUTPUT_PIN, CONTROL_DISALLOWED_VALUE);
 }
 
-// returns true if output enabled
+// returns true if in allowed mode/value.
 boolean getOutputStatus() {
   // TODO: sort inversion for diff modes
-  return digitalRead(OUTPUT_PIN);
+  //return digitalRead(OUTPUT_PIN);
+  return false;
 }
 
 // task to monitor output status, disable when necessary
 void monitorOutput() {
-  if (getOutputStatus() && (millis() > outputEnableTimer)) {
-    disableOutput();
+  if (millis() > outputEnableTimer) {
+    disallowedOutput();
   }
 }
 
@@ -467,10 +468,12 @@ uint8_t queryServer(String cardID) {
                 "Host: " + host + "\r\n" +
                 "Connection: close\r\n\r\n");
    int checkCounter = 0;
-   while (!client.available() && checkCounter < 30) {
+   while (!client.available() && checkCounter < 300) {
      delay(10);
      checkCounter++;
    }
+   Serial.println("Bored of waiting for response, checkCounter=");
+   Serial.println(checkCounter);
 
    // Read reply and decode json
    while(client.available()){
@@ -488,7 +491,10 @@ uint8_t queryServer(String cardID) {
      Serial.println("json:");
      Serial.println(json);
 
-     StaticJsonBuffer<200> jsonBuffer;
+     const int BUFFER_SIZE = JSON_OBJECT_SIZE(3) + JSON_OBJECT_SIZE(1);
+     Serial.print("BUFFER_SIZE=");
+     Serial.println(BUFFER_SIZE);
+     StaticJsonBuffer<BUFFER_SIZE> jsonBuffer;
 
      JsonObject& root = jsonBuffer.parseObject(json);
 
@@ -590,21 +596,32 @@ void sendTelegramMsg(String msg) {
  * ========================================================================== */
 
 void resetPN532() {
-  digitalWrite(PN532_RESET_PIN, HIGH);
-  delay(10);
-  digitalWrite(PN532_RESET_PIN, LOW);
-  delay(10);
-  digitalWrite(PN532_RESET_PIN, HIGH);
+  Serial.println("resetting PN532");
 
-  Serial.println("PN532 reset");
+  digitalWrite(PN532_RESET_PIN, HIGH);
+  delay(15);
+  digitalWrite(PN532_RESET_PIN, LOW);
+  delay(15);
+  digitalWrite(PN532_RESET_PIN, HIGH);
+  delay(15);
+
+  Serial.println("reset pin toggle done");
   
   nfc.begin();
 
   // added ref issue: https://github.com/Seeed-Studio/PN532/issues/44
   nfc.setPassiveActivationRetries(0x19);
 
-  nfc.getGeneralStatus();
-  nfc.getFirmwareVersion();
+  // PN532 manual 7.2.3, only the first two bytes:
+  // err, field: last error code, external rf field detected?
+  Serial.print("general status:       "); Serial.println(nfc.getGeneralStatus());
+  // PN532 manual 7.2.2, expected 0x32010607.
+  // - 0x32 chip = PN5*32*
+  // - 0x01 firmware version = 1
+  // - 0x06 firmware revision = 6
+  // - 0x07 supported cards = iso18092 + iso/iec 14443 Type B + 14443-A
+  Serial.print("get firmware version: "); Serial.println(nfc.getFirmwareVersion(), HEX);
+  
   
   //Serial.println(nfc.getGeneralStatus());
   //Serial.println(nfc.getFirmwareVersion());
@@ -617,7 +634,9 @@ void resetPN532() {
 void keepRFIDConnected() {
   
    // seem to need to call this before a getFirmwareVersion to get reliable response!?!
-   nfc.getGeneralStatus();
+   uint16_t generalstatus = nfc.getGeneralStatus();
+   Serial.print("General status (in keepRFIDConnected): ");
+   Serial.println(generalstatus, HEX);
 
    uint32_t versiondata = nfc.getFirmwareVersion();
 
@@ -698,7 +717,7 @@ void lookForCard() {
         sendLogMsg("Permission%20granted%20to:%20" + byteArrayToHexString(uid, uidLength));
         //sendTelegramMsg("Door opened");
 
-        enableOutput(OUTPUT_ENABLE_DURATION);
+        allowedOutput(OUTPUT_ENABLE_DURATION);
       } else {
         // permission denied!
         Serial.println("Permission denied");
@@ -784,16 +803,16 @@ void setup(void) {
   
   // configure pins
   pinMode(PN532_RESET_PIN, OUTPUT);
-  pinMode(DOOR_SENSOR_PIN, INPUT_PULLUP);
-  pinMode(OUTPUT_PIN, OUTPUT);
+  /* Don't configure output pin, disallowedOutput() will do that. */
 
-  // make sure door is locked / machine is off
-  disableOutput();
-  
   // start serial
   Serial.begin(115200);
 
   Serial.setDebugOutput(true);
+
+  // make sure door is locked / machine is off
+  disallowedOutput();
+  
   
   Serial.println("");
   Serial.println("AccessibleThingController");
@@ -826,10 +845,11 @@ void setup(void) {
   monitorOutputTask.enable();
 
   // mode-specific tasks
-  if (CONTROL_MODE == MODE_DOOR) {
+/*  if (CONTROL_MODE == MODE_DOOR) {
     runner.addTask(monitorDoorSensorTask);
     monitorDoorSensorTask.enable();
   }
+*/
 
   Serial.println("Ready");
 }
