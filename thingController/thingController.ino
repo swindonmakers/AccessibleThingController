@@ -21,6 +21,8 @@
 #define PN532_RESET_PIN   D4
 #define DOOR_SENSOR_PIN   D5
 #define OUTPUT_PIN        D6
+/* When shorted low, force allowed mode.  Leave undefined for no button. */
+#define DOOR_EXIT_BUTTON_PIN     D7
 
 /* ========================================================================== *
  *  Enums
@@ -59,6 +61,9 @@
 
 #define OUTPUT_ENABLE_DURATION          10000 // milliseconds
 
+/* Takes effect only if DOOR_EXIT_BUTTON_PIN is defined */
+// How long does pressing the exit button make us "allowed", milliseconds
+#define DOOR_EXIT_BUTTON_TIME 10000
 
 /* ========================================================================== *
  *  Types / Structures
@@ -142,6 +147,9 @@ Task displayUptimeTask(60000, TASK_FOREVER, &displayUptime);
 Task syncCacheTask(SYNC_CACHE_TASK_INTERVAL, TASK_FOREVER, &syncCache);
 Task monitorDoorSensorTask(MONITORDOORSENSOR_TASK_INTERVAL, TASK_FOREVER, &monitorDoorSensor);
 Task monitorOutputTask(MONITOROUTPUT_TASK_INTERVAL, TASK_FOREVER, &monitorOutput);
+#if defined(DOOR_EXIT_BUTTON_PIN)
+Task doorExitButtonTask((DOOR_EXIT_BUTTON_TIME * 3) / 2, TASK_FOREVER, &doorExitButton);
+#endif
 
 // scheduler
 Scheduler runner;
@@ -213,21 +221,27 @@ void displayUptime() {
  *  Output
  * ========================================================================== */
 
-// in door mode:  true = unlocked, false = locked
-// in machine mode: true = powered, false = unpowered
+// Current status: 0 disallowed, 1 allowed, 2 undefined
+char currentlyAllowed = 2;
 
 // duration in milliseconds
 void allowedOutput(unsigned long duration) {
-  Serial.println("+++ Output allowed");
-  pinMode(OUTPUT_PIN, CONTROL_ALLOWED_MODE);
-  digitalWrite(OUTPUT_PIN, CONTROL_ALLOWED_VALUE);
-  outputEnableTimer = millis() + duration;
+  if (currentlyAllowed != 1) {
+    Serial.println("+++ Output allowed");
+    currentlyAllowed = 1;
+    pinMode(OUTPUT_PIN, CONTROL_ALLOWED_MODE);
+    digitalWrite(OUTPUT_PIN, CONTROL_ALLOWED_VALUE);
+    outputEnableTimer = millis() + duration;
+  }
 }
 
 void disallowedOutput() {
-  Serial.println("--- Output disallowed");
-  pinMode(OUTPUT_PIN, CONTROL_DISALLOWED_MODE);
-  digitalWrite(OUTPUT_PIN, CONTROL_DISALLOWED_VALUE);
+  if (currentlyAllowed != 0) {
+    Serial.println("--- Output disallowed");
+    currentlyAllowed = 0;
+    pinMode(OUTPUT_PIN, CONTROL_DISALLOWED_MODE);
+    digitalWrite(OUTPUT_PIN, CONTROL_DISALLOWED_VALUE);
+  }
 }
 
 // returns true if in allowed mode/value.
@@ -790,6 +804,18 @@ void monitorDoorSensor() {
   }
 }
 
+/* ========================================================================== *
+ *  Door Exit Button
+ * ========================================================================== */
+#if defined(DOOR_EXIT_BUTTON_PIN)
+void doorExitButton() {
+  Serial.print("Exit button pressed");
+  /* Note the !, the button is meant to be wired between ground and the input pin! */
+  if (!digitalRead(DOOR_EXIT_BUTTON_PIN)) {
+    allowedOutput(DOOR_EXIT_BUTTON_TIME);
+  }
+}
+#endif
 
 /* ========================================================================== *
  *  Setup
@@ -805,6 +831,10 @@ void setup(void) {
   pinMode(PN532_RESET_PIN, OUTPUT);
   /* Don't configure output pin, disallowedOutput() will do that. */
 
+#if defined(DOOR_EXIT_BUTTON_PIN)
+  pinMode(DOOR_EXIT_BUTTON_PIN, INPUT_PULLUP);
+#endif
+  
   // start serial
   Serial.begin(115200);
 
@@ -835,6 +865,9 @@ void setup(void) {
   runner.addTask(displayUptimeTask);
   runner.addTask(syncCacheTask);
   runner.addTask(monitorOutputTask);
+#if defined(DOOR_EXIT_BUTTON_PIN)
+  runner.addTask(doorExitButtonTask);
+#endif
   
   // Enable tasks
   WifiConnectionTask.enableDelayed(30000);  // enough time to open the door before potential watchdog reset
@@ -843,6 +876,9 @@ void setup(void) {
   displayUptimeTask.enable();
   syncCacheTask.enable();
   monitorOutputTask.enable();
+#if defined(DOOR_EXIT_BUTTON_PIN)
+  doorExitButtonTask.enable();
+#endif
 
   // mode-specific tasks
 /*  if (CONTROL_MODE == MODE_DOOR) {
