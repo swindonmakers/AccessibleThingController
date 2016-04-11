@@ -19,10 +19,13 @@
 #define I2C_DATA_PIN      D3
 #define I2C_CLOCK_PIN     D1
 #define PN532_RESET_PIN   D4
-#define DOOR_SENSOR_PIN   D5
 #define OUTPUT_PIN        D6
+
 /* When shorted low, force allowed mode.  Leave undefined for no button. */
 #define DOOR_EXIT_BUTTON_PIN     D7
+
+/* When shorted low, the door is closed, leave undefined for no such. */
+#define DOOR_SENSOR_PIN   D5
 
 /* ========================================================================== *
  *  Enums
@@ -62,7 +65,7 @@
 #define OUTPUT_ENABLE_DURATION          10000 // milliseconds
 
 /* Takes effect only if DOOR_EXIT_BUTTON_PIN is defined */
-// How long does pressing the exit button make us "allowed", milliseconds
+/* How long does pressing the exit button make us "allowed", milliseconds */
 #define DOOR_EXIT_BUTTON_TIME 10000
 
 /* ========================================================================== *
@@ -113,11 +116,13 @@ void keepRFIDConnected();
 void lookForCard();
 void displayUptime();
 void syncCache();
-void monitorDoorSensor();
 void monitorOutput();
 #if defined(DOOR_EXIT_BUTTON_PIN)
 void doorExitButton();
 #endif
+
+// interrupt service routines
+void doorExitButtonISR();
 
 // other prototypes
 uint8_t queryServer(String cardID);
@@ -148,17 +153,15 @@ Task RFIDConnectionTask(RFID_CONNECTION_TASK_INTERVAL, TASK_FOREVER, &keepRFIDCo
 Task lookForCardTask(LOOKFORCARD_TASK_INTERVAL, TASK_FOREVER, &lookForCard);
 Task displayUptimeTask(60000, TASK_FOREVER, &displayUptime);
 Task syncCacheTask(SYNC_CACHE_TASK_INTERVAL, TASK_FOREVER, &syncCache);
-Task monitorDoorSensorTask(MONITORDOORSENSOR_TASK_INTERVAL, TASK_FOREVER, &monitorDoorSensor);
 Task monitorOutputTask(MONITOROUTPUT_TASK_INTERVAL, TASK_FOREVER, &monitorOutput);
-#if defined(DOOR_EXIT_BUTTON_PIN)
-Task doorExitButtonTask((DOOR_EXIT_BUTTON_TIME * 3) / 2, TASK_FOREVER, &doorExitButton);
-#endif
 
 // scheduler
 Scheduler runner;
 
 // output
-unsigned long outputEnableTimer;
+/* At what time should we stop outputting allowed */
+unsigned long outputAllowedTimer;
+
 
 /* ========================================================================== *
  *  Utility Functions
@@ -234,7 +237,7 @@ void allowedOutput(unsigned long duration) {
     currentlyAllowed = 1;
     pinMode(OUTPUT_PIN, CONTROL_ALLOWED_MODE);
     digitalWrite(OUTPUT_PIN, CONTROL_ALLOWED_VALUE);
-    outputEnableTimer = millis() + duration;
+    outputAllowedTimer = millis() + duration;
   }
 }
 
@@ -256,7 +259,7 @@ boolean getOutputStatus() {
 
 // task to monitor output status, disable when necessary
 void monitorOutput() {
-  if (millis() > outputEnableTimer) {
+  if (millis() > outputAllowedTimer) {
     disallowedOutput();
   }
 }
@@ -811,14 +814,22 @@ void monitorDoorSensor() {
  *  Door Exit Button
  * ========================================================================== */
 #if defined(DOOR_EXIT_BUTTON_PIN)
-void doorExitButton() {
+
+void doorExitButton_isr() {
   Serial.print("Exit button pressed");
-  /* Note the !, the button is meant to be wired between ground and the input pin! */
-  if (!digitalRead(DOOR_EXIT_BUTTON_PIN)) {
-    allowedOutput(DOOR_EXIT_BUTTON_TIME);
-  }
+  /* Note that we don't need to read the pin, since we only asked for FALLING interrupts.
+   * No need to debounce, multiple calls to allowedOutput are fine anyway. */
+  allowedOutput(DOOR_EXIT_BUTTON_TIME);
 }
+
+void doorExitButton_setup(Scheduler runner) {
+  pinMode(DOOR_EXIT_BUTTON_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(DOOR_EXIT_BUTTON_PIN), doorExitButton_isr, FALLING);
+}
+
 #endif
+
+
 
 /* ========================================================================== *
  *  Setup
@@ -834,10 +845,6 @@ void setup(void) {
   pinMode(PN532_RESET_PIN, OUTPUT);
   /* Don't configure output pin, disallowedOutput() will do that. */
 
-#if defined(DOOR_EXIT_BUTTON_PIN)
-  pinMode(DOOR_EXIT_BUTTON_PIN, INPUT_PULLUP);
-#endif
-  
   // start serial
   Serial.begin(115200);
 
@@ -846,11 +853,9 @@ void setup(void) {
   // make sure door is locked / machine is off
   disallowedOutput();
   
-  
   Serial.println("");
   Serial.println("AccessibleThingController");
   Serial.print("V:");  Serial.println(VERSION);
-
 
   // Start PN532
   Serial.println("Connecting to PN532...");
@@ -862,15 +867,17 @@ void setup(void) {
   // Setup scheduler
   Serial.println("Configuring tasks...");
   runner.init();
+
+#if defined(DOOR_EXIT_BUTTON_PIN)
+  doorExitButton_setup(runner);
+#endif
+
   runner.addTask(WifiConnectionTask);
   runner.addTask(RFIDConnectionTask);
   runner.addTask(lookForCardTask);
   runner.addTask(displayUptimeTask);
   runner.addTask(syncCacheTask);
   runner.addTask(monitorOutputTask);
-#if defined(DOOR_EXIT_BUTTON_PIN)
-  runner.addTask(doorExitButtonTask);
-#endif
   
   // Enable tasks
   WifiConnectionTask.enableDelayed(30000);  // enough time to open the door before potential watchdog reset
@@ -879,16 +886,6 @@ void setup(void) {
   displayUptimeTask.enable();
   syncCacheTask.enable();
   monitorOutputTask.enable();
-#if defined(DOOR_EXIT_BUTTON_PIN)
-  doorExitButtonTask.enable();
-#endif
-
-  // mode-specific tasks
-/*  if (CONTROL_MODE == MODE_DOOR) {
-    runner.addTask(monitorDoorSensorTask);
-    monitorDoorSensorTask.enable();
-  }
-*/
 
   Serial.println("Ready");
 }
