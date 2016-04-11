@@ -115,6 +115,9 @@ void displayUptime();
 void syncCache();
 void monitorDoorSensor();
 void monitorOutput();
+#if defined(DOOR_EXIT_BUTTON_PIN)
+void doorExitButton();
+#endif
 
 // other prototypes
 uint8_t queryServer(String cardID);
