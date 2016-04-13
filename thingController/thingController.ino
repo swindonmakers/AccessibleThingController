@@ -1,5 +1,6 @@
+// Enable WIFI debugging
 #define DEBUG_ESP_PORT Serial
-#define DDEBUG_ESP_CORE 
+#define DDEBUG_ESP_CORE
 #define DDEBUG_ESP_WIFI
 
 #include <ArduinoJson.h>
@@ -19,17 +20,16 @@
 #define I2C_DATA_PIN      D3
 #define I2C_CLOCK_PIN     D1
 #define PN532_RESET_PIN   D4
-#define OUTPUT_PIN        D6
-
-/* When shorted low, force allowed mode.  Leave undefined for no button. */
-#define DOOR_EXIT_BUTTON_PIN     D7
-
-/* When shorted low, the door is closed, leave undefined for no such. */
+//#define PN532_IRQ_PIN     ?
 #define DOOR_SENSOR_PIN   D5
+#define OUTPUT_PIN        D6
+#define EXIT_BUTTON_PIN   D7  // normally open, pulled high
+
 
 /* ========================================================================== *
  *  Enums
  * ========================================================================== */
+
 
 /* ========================================================================== *
  *  Configuration
@@ -39,18 +39,13 @@
 #define EEPROM_MAGIC      2  // update to clear EEPROM on restart
 #define THING_ID          "1A9E3D66-E90F-11E5-83C1-1E346D398B53"
 #define THING_NAME        "DOOR"
-#define CONTROL_ALLOWED_MODE      OUTPUT
-#define CONTROL_ALLOWED_VALUE     LOW
-#define CONTROL_DISALLOWED_MODE   OUTPUT
-#define CONTROL_DISALLOWED_VALUE  HIGH
-//#define NETWORK_SSID      "PI_Guest"
-//#define NETWORK_PASSWORD  "@Trop1cana@"
-#define NETWORK_SSID      "desert-island-2g"
-#define NETWORK_PASSWORD  "messageinabottle"
-#define SERVER_HOST       "desert-island.me.uk"
-#define SERVER_PORT       80
-#define SERVER_URLPREFIX  "/accesssystem/"
-#define TELEGRAM_HOST     "149.154.167.198"  // api.telegram.org
+#define CONTROL_MODE      MODE_DOOR
+#define NETWORK_SSID      "swindon-makerspace"
+#define NETWORK_PASSWORD  "makeallthethings"
+#define SERVER_HOST       "192.168.1.70"
+#define SERVER_PORT       3000
+#define SERVER_URLPREFIX  "/"
+#define TELEGRAM_HOST     "api.telegram.org"  // api.telegram.org
 #define WIFI_CONNECTION_TASK_INTERVAL   60000 // milliseconds
 #define RFID_CONNECTION_TASK_INTERVAL   10000 // milliseconds
 #define LOOKFORCARD_TASK_INTERVAL       100   // milliseconds
@@ -64,9 +59,9 @@
 
 #define OUTPUT_ENABLE_DURATION          10000 // milliseconds
 
-/* Takes effect only if DOOR_EXIT_BUTTON_PIN is defined */
-/* How long does pressing the exit button make us "allowed", milliseconds */
-#define DOOR_EXIT_BUTTON_TIME 10000
+IPAddress ip(192,168,1,253);  //Node static IP
+IPAddress gateway(192,168,1,254);
+IPAddress subnet(255,255,255,0);
 
 /* ========================================================================== *
  *  Types / Structures
@@ -88,7 +83,7 @@
   */
 
 // tokens are 4 or 7-byte values, held in a fixed 7-byte array
-typedef  uint8_t TOKEN[7];
+typedef uint8_t TOKEN[7];
 
 // flags for TOKEN_CACHE_ITEM
 #define TOKEN_ACCESS    0x01
@@ -103,7 +98,7 @@ struct TOKEN_CACHE_ITEM {
     uint16_t count;   // scan count
     uint8_t sync;     // countdown to resync with cache with server
 };
-// stored size = 12 bytes
+// stored size = 9 bytes
 
 
 /* ========================================================================== *
@@ -116,13 +111,9 @@ void keepRFIDConnected();
 void lookForCard();
 void displayUptime();
 void syncCache();
+void monitorDoorSensor();
 void monitorOutput();
-#if defined(DOOR_EXIT_BUTTON_PIN)
-void doorExitButton();
-#endif
-
-// interrupt service routines
-void doorExitButtonISR();
+void monitorExitButton();
 
 // other prototypes
 uint8_t queryServer(String cardID);
@@ -140,6 +131,7 @@ const int hostPort = SERVER_PORT;
 
 PN532_I2C pn532i2c(Wire, I2C_DATA_PIN, I2C_CLOCK_PIN);  // data, clock
 PN532 nfc(pn532i2c);
+uint16_t PN532Resets = 0;  // reset counter
 
 // the cache
 TOKEN_CACHE_ITEM cache[CACHE_SIZE];
@@ -153,15 +145,18 @@ Task RFIDConnectionTask(RFID_CONNECTION_TASK_INTERVAL, TASK_FOREVER, &keepRFIDCo
 Task lookForCardTask(LOOKFORCARD_TASK_INTERVAL, TASK_FOREVER, &lookForCard);
 Task displayUptimeTask(60000, TASK_FOREVER, &displayUptime);
 Task syncCacheTask(SYNC_CACHE_TASK_INTERVAL, TASK_FOREVER, &syncCache);
+Task monitorDoorSensorTask(MONITORDOORSENSOR_TASK_INTERVAL, TASK_FOREVER, &monitorDoorSensor);
 Task monitorOutputTask(MONITOROUTPUT_TASK_INTERVAL, TASK_FOREVER, &monitorOutput);
+Task monitorExitButtonTask(1, TASK_FOREVER, &monitorExitButton);
 
 // scheduler
 Scheduler runner;
 
 // output
-/* At what time should we stop outputting allowed */
-unsigned long outputAllowedTimer;
+unsigned long outputEnableTimer;
 
+// exit button debounce - crappy hack
+unsigned long exitButtonTimer;
 
 /* ========================================================================== *
  *  Utility Functions
@@ -193,15 +188,15 @@ void uptime(boolean display = true)
     rollover++;
     highMillis = false;
   }
-  
+
   secs = millis()/1000;
-  mins=secs/60; 
+  mins=secs/60;
   hours=mins/60;
-  days=(rollover * 50) + hours/24; 
-  secs=secs-(mins*60); //subtract the coverted seconds to minutes in order to display 59 secs max 
+  days=(rollover * 50) + hours/24;
+  secs=secs-(mins*60); //subtract the coverted seconds to minutes in order to display 59 secs max
   mins=mins-(hours*60); //subtract the coverted minutes to hours in order to display 59 minutes max
   hours=hours-(days*24); //subtract the coverted hours to days in order to display 23 hours max
-  
+
   //Display results
   if (display) {
     Serial.print("Uptime: ");
@@ -227,40 +222,30 @@ void displayUptime() {
  *  Output
  * ========================================================================== */
 
-// Current status: 0 disallowed, 1 allowed, 2 undefined
-char currentlyAllowed = 2;
+// Maglock connected to NC terminals on relay, output:  true = unlocked, false = locked
 
 // duration in milliseconds
-void allowedOutput(unsigned long duration) {
-  if (currentlyAllowed != 1) {
-    Serial.println("+++ Output allowed");
-    currentlyAllowed = 1;
-    pinMode(OUTPUT_PIN, CONTROL_ALLOWED_MODE);
-    digitalWrite(OUTPUT_PIN, CONTROL_ALLOWED_VALUE);
-    outputAllowedTimer = millis() + duration;
-  }
+void unlockDoor(unsigned long duration) {
+  Serial.println("Door Unlocked");
+  digitalWrite(OUTPUT_PIN, LOW);
+  outputEnableTimer = millis() + duration;
 }
 
-void disallowedOutput() {
-  if (currentlyAllowed != 0) {
-    Serial.println("--- Output disallowed");
-    currentlyAllowed = 0;
-    pinMode(OUTPUT_PIN, CONTROL_DISALLOWED_MODE);
-    digitalWrite(OUTPUT_PIN, CONTROL_DISALLOWED_VALUE);
-  }
-}
-
-// returns true if in allowed mode/value.
-boolean getOutputStatus() {
+void lockDoor() {
   // TODO: sort inversion for diff modes
-  //return digitalRead(OUTPUT_PIN);
-  return false;
+  Serial.println("Door Locked");
+  digitalWrite(OUTPUT_PIN, HIGH);
+}
+
+// returns true if door unlocked
+boolean isDoorUnlocked() {
+  return !digitalRead(OUTPUT_PIN);
 }
 
 // task to monitor output status, disable when necessary
 void monitorOutput() {
-  if (millis() > outputAllowedTimer) {
-    disallowedOutput();
+  if (isDoorUnlocked() && (millis() > outputEnableTimer)) {
+    lockDoor();
   }
 }
 
@@ -282,7 +267,7 @@ TOKEN_CACHE_ITEM* getTokenFromCache(TOKEN* token, uint8_t length) {
       break;
     }
   }
-  
+
   return item;
 }
 
@@ -292,11 +277,11 @@ TOKEN_CACHE_ITEM* addTokenToCache(TOKEN* token, uint8_t length, uint8_t flags) {
   // if cache not full, then add a new item to end of array
   uint8_t pos = cacheSize;
   uint8_t i;
-  
-  // else, find item with least scans 
+
+  // else, find item with least scans
   if (cacheSize == CACHE_SIZE) {
     cacheSize = 0;  // start at the beginning
-    
+
     for (i=0; i < cacheSize; i++) {
       if (cache[i].count < cache[pos].count) {
         pos = i;
@@ -313,10 +298,16 @@ TOKEN_CACHE_ITEM* addTokenToCache(TOKEN* token, uint8_t length, uint8_t flags) {
   cache[pos].count = 1;
   cache[pos].sync = CACHE_SYNC;
 
-  // TODO: selection sort all items
+  // TODO: selection sort all items?
 
   // write new info to EEPROM
   syncEEPROM();
+
+  // print number of cache slots used
+  Serial.print("Cache used: ");
+  Serial.print(cacheSize);
+  Serial.print('/');
+  Serial.println(CACHE_SIZE);
 
   // return new item
   return &cache[pos];
@@ -324,7 +315,7 @@ TOKEN_CACHE_ITEM* addTokenToCache(TOKEN* token, uint8_t length, uint8_t flags) {
 
 void initCache() {
   Serial.println("Loading cache from EEPROM...");
-  
+
   EEPROM.begin(2 + 8 * CACHE_SIZE);
 
   // read magic
@@ -350,10 +341,10 @@ void initCache() {
     for (j=0; j<7; j++) {
       cache[i].token[j] = EEPROM.read(addr + j);
     }
-    
+
     // length
     cache[i].length = EEPROM.read(addr + 7);
-    
+
     // flags
     cache[i].flags = EEPROM.read(addr + 8);
 
@@ -375,7 +366,7 @@ void syncCache() {
   if ( WiFi.status() != WL_CONNECTED ) {
      return;
    }
-  
+
   // for each item in cache
   uint8_t i;
   for (i=0; i<cacheSize; i++) {
@@ -386,7 +377,7 @@ void syncCache() {
     if (cache[i].sync == 0) {
       Serial.print("Syncing cached flags for: ");
       Serial.println(byteArrayToHexString(cache[i].token, cache[i].length));
-      
+
       // query permission flags from server
       uint8_t flags = queryServer(byteArrayToHexString(cache[i].token, cache[i].length));
 
@@ -398,7 +389,7 @@ void syncCache() {
         // else try again next cycle
         cache[i].sync = 1;
       }
-      
+
     }
   }
 
@@ -419,7 +410,7 @@ boolean updateEEPROM(int address, uint8_t value) {
 // update EEPROM to match cache
 void syncEEPROM() {
   boolean changed = false;
-  
+
   changed |= updateEEPROM(1, cacheSize);
 
   // update items from cache
@@ -430,13 +421,13 @@ void syncEEPROM() {
     for (j=0; j<7; j++) {
       changed |= updateEEPROM(addr + j, cache[i].token[j]);
     }
-    
+
     // length
     changed |= updateEEPROM(addr + 7, cache[i].length);
-    
+
     // flags
     changed |= updateEEPROM(addr + 8, cache[i].flags);
-    
+
     addr += 9;
   }
 
@@ -455,13 +446,13 @@ void syncEEPROM() {
 uint8_t queryServer(String cardID) {
    // TODO: Rewrite/refactor
    uint8_t flags = 0;
-   
+
    // check if connected
    if ( WiFi.status() != WL_CONNECTED ) {
      Serial.println("Error: WiFi Not Connected");
      return TOKEN_ERROR;
    }
-  
+
    Serial.print("Querying server: ");
    Serial.println(host);
 
@@ -488,12 +479,10 @@ uint8_t queryServer(String cardID) {
                 "Host: " + host + "\r\n" +
                 "Connection: close\r\n\r\n");
    int checkCounter = 0;
-   while (!client.available() && checkCounter < 300) {
+   while (!client.available() && checkCounter < 3000) {
      delay(10);
      checkCounter++;
    }
-   Serial.println("Bored of waiting for response, checkCounter=");
-   Serial.println(checkCounter);
 
    // Read reply and decode json
    while(client.available()){
@@ -502,7 +491,7 @@ uint8_t queryServer(String cardID) {
      boolean endOfHeaders = false;
      while (!endOfHeaders && client.available()) {
        // feed the watchdog
-       ESP.wdtFeed(); 
+       yield();
        json = client.readStringUntil('\n');
        Serial.print("_");
        Serial.print(json);
@@ -511,10 +500,7 @@ uint8_t queryServer(String cardID) {
      Serial.println("json:");
      Serial.println(json);
 
-     const int BUFFER_SIZE = JSON_OBJECT_SIZE(3) + JSON_OBJECT_SIZE(1);
-     Serial.print("BUFFER_SIZE=");
-     Serial.println(BUFFER_SIZE);
-     StaticJsonBuffer<BUFFER_SIZE> jsonBuffer;
+     StaticJsonBuffer<200> jsonBuffer;
 
      JsonObject& root = jsonBuffer.parseObject(json);
 
@@ -533,7 +519,7 @@ uint8_t queryServer(String cardID) {
        flags |= TOKEN_TRAINER;
      }
    }
-   
+
    // close connection
    client.stop();
 
@@ -545,7 +531,7 @@ uint8_t queryServer(String cardID) {
 void sendLogMsg(String msg) {
    Serial.print("Sending log to server: ");
    Serial.println(host);
-   
+
    // check if connected
    if ( WiFi.status() != WL_CONNECTED ) {
     Serial.println("Error: WiFi Not Connected");
@@ -578,10 +564,10 @@ void sendLogMsg(String msg) {
 }
 
 
-
+// TODO: Fix this, has stopped working?!?
 void sendTelegramMsg(String msg) {
    Serial.print("Sending msg to telegram");
-   
+
    // check if connected
    if ( WiFi.status() != WL_CONNECTED ) {
     Serial.println("Error: WiFi Not Connected");
@@ -616,64 +602,52 @@ void sendTelegramMsg(String msg) {
  * ========================================================================== */
 
 void resetPN532() {
-  Serial.println("resetting PN532");
-
   digitalWrite(PN532_RESET_PIN, HIGH);
-  delay(15);
+  delay(10);
   digitalWrite(PN532_RESET_PIN, LOW);
-  delay(15);
+  delay(10);
   digitalWrite(PN532_RESET_PIN, HIGH);
-  delay(15);
 
-  Serial.println("reset pin toggle done");
-  
+  // inc reset counter
+  PN532Resets++;
+
+  Serial.print("PN532 reset: ");  Serial.println(PN532Resets);
+
   nfc.begin();
 
   // added ref issue: https://github.com/Seeed-Studio/PN532/issues/44
   nfc.setPassiveActivationRetries(0x19);
 
-  // PN532 manual 7.2.3, only the first two bytes:
-  // err, field: last error code, external rf field detected?
-  Serial.print("general status:       "); Serial.println(nfc.getGeneralStatus());
-  // PN532 manual 7.2.2, expected 0x32010607.
-  // - 0x32 chip = PN5*32*
-  // - 0x01 firmware version = 1
-  // - 0x06 firmware revision = 6
-  // - 0x07 supported cards = iso18092 + iso/iec 14443 Type B + 14443-A
-  Serial.print("get firmware version: "); Serial.println(nfc.getFirmwareVersion(), HEX);
-  
-  
+  nfc.getGeneralStatus();
+  nfc.getFirmwareVersion();
+
   //Serial.println(nfc.getGeneralStatus());
   //Serial.println(nfc.getFirmwareVersion());
 
   nfc.SAMConfig();
 }
 
+// TODO: Get IRQ working to avoid polling for card?
+void cardAvailable() {
+  Serial.println("IRQ change");
+}
 
-// Called in main loop
+// Task to keep RFID connected - i.e. reset PN532 if goes weird
 void keepRFIDConnected() {
-  
+
    // seem to need to call this before a getFirmwareVersion to get reliable response!?!
-   uint16_t generalstatus = nfc.getGeneralStatus();
-   Serial.print("General status (in keepRFIDConnected): ");
-   Serial.println(generalstatus, HEX);
+   nfc.getGeneralStatus();
 
    uint32_t versiondata = nfc.getFirmwareVersion();
 
    if (! versiondata) {
       Serial.println("PN532 -> Error - Resetting");
 
-      // Resetting the PN532 doesn't seem to resolve I2C lock-up, needs ESP reset
-      // or... maybe this is fixed, now the clock stretching bit is patched
+      // Reset the PN532 if it locks up
       resetPN532();
 
-      // Reset the ESP !!!
-      //ESP.reset();
-
-      // Redundant, as ESP reboots and never gets here
-      //RFIDConnectionTask.setInterval(1000);
    } else {
-      Serial.println("PN532 -> OK");
+      //Serial.println("PN532 -> OK");
 
       // configure board to read RFID tags - again and again
       nfc.SAMConfig();
@@ -682,7 +656,7 @@ void keepRFIDConnected() {
    }
 }
 
-// Called from main loop to poll for card
+// Task to poll for card
 void lookForCard() {
   uint8_t success;
   TOKEN uid;  // Buffer to store the returned UID
@@ -690,7 +664,7 @@ void lookForCard() {
 
   static TOKEN luid;  // last scanned uid, for debounce
   static unsigned long lastChecked;
-  
+
   TOKEN_CACHE_ITEM* item;
 
   //Serial.print(".");
@@ -709,8 +683,8 @@ void lookForCard() {
 
     Serial.print("Card found, token: ");  Serial.println(byteArrayToHexString(uid, uidLength));
 
-    // check cache 
-    item = getTokenFromCache(&uid, uidLength); 
+    // check cache
+    item = getTokenFromCache(&uid, uidLength);
 
     //if not found, then query server and add to cache if has permission
     if (item == NULL) {
@@ -731,13 +705,14 @@ void lookForCard() {
       if (item->flags && TOKEN_ACCESS) {
         // permission given, so open/power the thing
         item->count++;
-        
+
         Serial.print("Permission granted: ");
         Serial.println(item->count);
+        unlockDoor(OUTPUT_ENABLE_DURATION);
+
         sendLogMsg("Permission%20granted%20to:%20" + byteArrayToHexString(uid, uidLength));
         //sendTelegramMsg("Door opened");
 
-        allowedOutput(OUTPUT_ENABLE_DURATION);
       } else {
         // permission denied!
         Serial.println("Permission denied");
@@ -747,7 +722,7 @@ void lookForCard() {
     } else {
       Serial.println("Error: Couldn't determine permissions");
     }
-    
+
   }
 }
 
@@ -756,7 +731,7 @@ void lookForCard() {
  *  WiFi Client
  * ========================================================================== */
 
-// Called in main loop
+// Task to keep wifi connected
 void keepWifiConnected() {
 
    if (WiFi.status() != WL_CONNECTED) {
@@ -765,6 +740,7 @@ void keepWifiConnected() {
       WiFi.disconnect(true); // abandon any previous connection attempt
       WiFi.mode(WIFI_STA);  // force mode to STA only
       WiFi.begin(ssid, password);  // try again
+      WiFi.config(ip, gateway, subnet);  // use static IP as more stable/faster than DHCP
 
       // check again to see if connection established...
       WifiConnectionTask.setInterval(WIFI_CONNECTION_TASK_INTERVAL);
@@ -783,11 +759,13 @@ void keepWifiConnected() {
  *  Door Sensor
  * ========================================================================== */
 
+// Task to keep an eye on the door sensor (reed switch)
 void monitorDoorSensor() {
-  static boolean doorOpen = false;  // true = open, false = closed
-  
-  //Serial.println(digitalRead(DOOR_SENSOR_PIN));  
+  static boolean doorOpen = false;
 
+  //Serial.println(digitalRead(DOOR_SENSOR_PIN));
+
+  // Switch is to ground, with internal pullup enabled...
   // sensor value: 0 = closed, 1 = open
   boolean newDoorOpen = digitalRead(DOOR_SENSOR_PIN);
 
@@ -796,14 +774,15 @@ void monitorDoorSensor() {
     doorOpen = newDoorOpen;
 
     if (doorOpen) {
-      Serial.println("Door opened"); 
+      Serial.println("Door opened");
 
       // Compare to lock status...  scream if not expected to be opened!!
-      if (!getOutputStatus()) {
-        Serial.println("AAARRGH: Door opened, but still locked!!!");
-        sendTelegramMsg("AARGH someone has forced the door open");
+      // also check to see if the exit button was pressed recently...
+      if (!isDoorUnlocked() && ( millis() > exitButtonTimer+100 ) ) {
+        Serial.println("AAARRGH: Door opened, but should be locked!!!");
+        //sendTelegramMsg("AARGH someone has forced the door open");
       }
-      
+
     } else {
       Serial.println("Door closed");
     }
@@ -811,24 +790,30 @@ void monitorDoorSensor() {
 }
 
 /* ========================================================================== *
- *  Door Exit Button
+ *  Exit Button
  * ========================================================================== */
-#if defined(DOOR_EXIT_BUTTON_PIN)
 
-void doorExitButton_isr() {
-  Serial.print("Exit button pressed");
-  /* Note that we don't need to read the pin, since we only asked for FALLING interrupts.
-   * No need to debounce, multiple calls to allowedOutput are fine anyway. */
-  allowedOutput(DOOR_EXIT_BUTTON_TIME);
+void exitButtonISR() {
+  //Serial.println("Exit button pressed");
+  //unlockDoor(OUTPUT_ENABLE_DURATION);
+
+  // crappy debounce
+  // TODO: make not crappy... ideally by not needing a debounce
+  // note the time the ISR was triggered, poll in main loop to see if still pressed
+  exitButtonTimer = millis();
 }
 
-void doorExitButton_setup(Scheduler runner) {
-  pinMode(DOOR_EXIT_BUTTON_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(DOOR_EXIT_BUTTON_PIN), doorExitButton_isr, FALLING);
+void monitorExitButton() {
+    // see if the exit button is currently pressed, note inverted input
+    if (!digitalRead(EXIT_BUTTON_PIN)) {
+      // crappy debounce:
+      // make sure it's been at least 30ms since the ISR was triggered
+      if (exitButtonTimer + 30 < millis()) {
+        Serial.println("Exit button pressed");
+        unlockDoor(OUTPUT_ENABLE_DURATION);
+      }
+    }
 }
-
-#endif
-
 
 
 /* ========================================================================== *
@@ -840,22 +825,31 @@ void setup(void) {
   WiFi.disconnect(true);
   WiFi.softAPdisconnect();
   WiFi.setAutoReconnect(false);
-  
+
   // configure pins
   pinMode(PN532_RESET_PIN, OUTPUT);
-  /* Don't configure output pin, disallowedOutput() will do that. */
+  //pinMode(PN532_IRQ_PIN, INPUT_PULLUP);
+  pinMode(DOOR_SENSOR_PIN, INPUT_PULLUP);
+  pinMode(OUTPUT_PIN, OUTPUT);
+  pinMode(EXIT_BUTTON_PIN, INPUT_PULLUP);
+  digitalWrite(EXIT_BUTTON_PIN, HIGH);
+
+  //attachInterrupt(digitalPinToInterrupt(PN532_IRQ_PIN), cardAvailable, CHANGE);
+
+  // make sure door is locked
+  lockDoor();
 
   // start serial
   Serial.begin(115200);
 
   Serial.setDebugOutput(true);
 
-  // make sure door is locked / machine is off
-  disallowedOutput();
-  
   Serial.println("");
-  Serial.println("AccessibleThingController");
+  Serial.println("Door Controller");
   Serial.print("V:");  Serial.println(VERSION);
+
+  Serial.println("Listening for exit button...");
+  attachInterrupt(digitalPinToInterrupt(EXIT_BUTTON_PIN), exitButtonISR, FALLING);
 
   // Start PN532
   Serial.println("Connecting to PN532...");
@@ -867,18 +861,15 @@ void setup(void) {
   // Setup scheduler
   Serial.println("Configuring tasks...");
   runner.init();
-
-#if defined(DOOR_EXIT_BUTTON_PIN)
-  doorExitButton_setup(runner);
-#endif
-
   runner.addTask(WifiConnectionTask);
-  runner.addTask(RFIDConnectionTask);
   runner.addTask(lookForCardTask);
   runner.addTask(displayUptimeTask);
   runner.addTask(syncCacheTask);
   runner.addTask(monitorOutputTask);
-  
+  runner.addTask(RFIDConnectionTask);
+  runner.addTask(monitorExitButtonTask);
+  runner.addTask(monitorDoorSensorTask);
+
   // Enable tasks
   WifiConnectionTask.enableDelayed(30000);  // enough time to open the door before potential watchdog reset
   RFIDConnectionTask.enable();
@@ -886,8 +877,11 @@ void setup(void) {
   displayUptimeTask.enable();
   syncCacheTask.enable();
   monitorOutputTask.enable();
+  monitorExitButtonTask.enable();
+  monitorDoorSensorTask.enable();
 
   Serial.println("Ready");
+  Serial.println();
 }
 
 
@@ -895,7 +889,7 @@ void setup(void) {
  *  Main Loop
  * ========================================================================== */
 
-void loop(void) {  
+void loop(void) {
   // execute tasks
   runner.execute();
 
@@ -907,5 +901,7 @@ void loop(void) {
   // send heartbeat to server - 10min?
   // Manage display/LED
   // Manage buzzer
-  // Monitor button(s) - exit button or timer buttons
+
+  // just in case
+  yield();
 }
