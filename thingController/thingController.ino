@@ -11,6 +11,7 @@
 #include <PN532.h>
 #include <TaskScheduler.h>
 #include <EEPROM.h>
+#include <Adafruit_NeoPixel.h>
 
 /* ========================================================================== *
  *  Pinout
@@ -24,7 +25,7 @@
 #define DOOR_SENSOR_PIN   D5
 #define OUTPUT_PIN        D6
 #define EXIT_BUTTON_PIN   D7  // normally open, pulled high
-
+#define NEOPIXEL_PIN      D8
 
 /* ========================================================================== *
  *  Enums
@@ -45,7 +46,8 @@
 #define SERVER_HOST       "192.168.1.70"
 #define SERVER_PORT       3000
 #define SERVER_URLPREFIX  "/"
-#define TELEGRAM_HOST     "api.telegram.org"  // api.telegram.org
+// http://www.swindon-makerspace.org/api/telegram/?msg=i+do+not+spellz+good&groupid=-20679102
+#define TELEGRAM_HOST     "www.swindon-makerspace.org"
 #define WIFI_CONNECTION_TASK_INTERVAL   60000 // milliseconds
 #define RFID_CONNECTION_TASK_INTERVAL   10000 // milliseconds
 #define LOOKFORCARD_TASK_INTERVAL       100   // milliseconds
@@ -53,7 +55,7 @@
 #define MONITORDOORSENSOR_TASK_INTERVAL 500   // milliseconds
 #define MONITOROUTPUT_TASK_INTERVAL     500   // milliseconds
 #define CARD_DEBOUNCE_DELAY             2000  // milliseconds
-#define PN532_READ_TIMEOUT              100   // milliseconds
+#define PN532_READ_TIMEOUT              50   // milliseconds
 #define CACHE_SIZE        32
 #define CACHE_SYNC        240   // resync cache after <value> x 10 minutes
 
@@ -114,9 +116,11 @@ void syncCache();
 void monitorDoorSensor();
 void monitorOutput();
 void monitorExitButton();
+void animation();
 
 // other prototypes
 uint8_t queryServer(String cardID);
+boolean isDoorUnlocked();
 
 void syncEEPROM();
 
@@ -157,6 +161,10 @@ unsigned long outputEnableTimer;
 
 // exit button debounce - crappy hack
 unsigned long exitButtonTimer;
+
+// neopixel
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(24, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
 
 /* ========================================================================== *
  *  Utility Functions
@@ -219,6 +227,37 @@ void displayUptime() {
 
 
 /* ========================================================================== *
+ *  NEOPIXEL
+ * ========================================================================== */
+
+void colorWipe(uint32_t c, uint8_t wait, uint8_t ) {
+  for(uint16_t i=0; i<strip.numPixels(); i++) {
+    strip.setPixelColor(i, c);
+    if (wait >0 ) {
+      strip.show();
+      delay(wait);
+    }
+  }
+  if (wait == 0) {
+    strip.show();
+  }
+}
+
+void animation() {
+   if (isDoorUnlocked()) {
+      return;
+   }
+  
+   // breath animation
+   static float tmr = 0;
+   tmr += 0.1;
+
+   uint8_t br = 25 * sin(tmr) + 50;
+
+   colorWipe(strip.Color(br, br /2, 0), 0);
+}
+
+/* ========================================================================== *
  *  Output
  * ========================================================================== */
 
@@ -229,12 +268,16 @@ void unlockDoor(unsigned long duration) {
   Serial.println("Door Unlocked");
   digitalWrite(OUTPUT_PIN, LOW);
   outputEnableTimer = millis() + duration;
+  // green when unlocked
+  colorWipe(strip.Color(0, 255, 0), 1);
 }
 
 void lockDoor() {
   // TODO: sort inversion for diff modes
   Serial.println("Door Locked");
   digitalWrite(OUTPUT_PIN, HIGH);
+  // return to orange
+  colorWipe(strip.Color(50, 25, 0), 50);
 }
 
 // returns true if door unlocked
@@ -574,13 +617,13 @@ void sendTelegramMsg(String msg) {
     return;
    }
 
-   WiFiClientSecure client;
-   if (!client.connect(TELEGRAM_HOST, 443)) {
+   WiFiClient client;
+   if (!client.connect(TELEGRAM_HOST, 80)) {
      Serial.println("Error: Connection failed");
      return;
    }
 
-   String url = "/bot189740736:AAFaZX7TaqEMg8g9bjrAkzaSH3gbAdt7vpE/sendMessage?chat_id=-20679102&text=";
+   String url = "/api/telegram/?groupid=-20679102&msg=";
    url += msg;
 
    Serial.println(url);
@@ -683,6 +726,9 @@ void lookForCard() {
 
     Serial.print("Card found, token: ");  Serial.println(byteArrayToHexString(uid, uidLength));
 
+    // blue - found card
+    colorWipe(strip.Color(255, 128, 0), 1);
+
     // check cache
     item = getTokenFromCache(&uid, uidLength);
 
@@ -711,16 +757,35 @@ void lookForCard() {
         unlockDoor(OUTPUT_ENABLE_DURATION);
 
         sendLogMsg("Permission%20granted%20to:%20" + byteArrayToHexString(uid, uidLength));
+        
         //sendTelegramMsg("Door opened");
 
       } else {
         // permission denied!
         Serial.println("Permission denied");
         sendLogMsg("Permission%20denied%20to:%20" + byteArrayToHexString(uid, uidLength));
+
+        // red
+        colorWipe(strip.Color(255, 0, 0), 5);
+
+        delay(1000);
+
+        // orange
+        colorWipe(strip.Color(50, 25, 0), 25);
       }
 
     } else {
-      Serial.println("Error: Couldn't determine permissions");
+      // permission denied!
+        Serial.println("Permission denied");
+        sendLogMsg("Permission%20denied%20to:%20" + byteArrayToHexString(uid, uidLength));
+
+        // red
+        colorWipe(strip.Color(255, 0, 0), 5);
+
+        delay(1000);
+
+        // orange
+        colorWipe(strip.Color(50, 25, 0), 25);
     }
 
   }
@@ -815,7 +880,6 @@ void monitorExitButton() {
     }
 }
 
-
 /* ========================================================================== *
  *  Setup
  * ========================================================================== */
@@ -858,6 +922,10 @@ void setup(void) {
   // init EEPROM and load cache
   initCache();
 
+  Serial.println("Starting fancy LEDs...");
+  strip.begin();
+  strip.show(); // Initialize all pixels to 'off'
+
   // Setup scheduler
   Serial.println("Configuring tasks...");
   runner.init();
@@ -882,6 +950,19 @@ void setup(void) {
 
   Serial.println("Ready");
   Serial.println();
+  
+  // orange boot sequence
+  colorWipe(strip.Color(50, 25, 0), 50);
+
+  // start animation timer
+  /*
+  noInterrupts();
+  timer1_isr_init();
+  timer1_attachInterrupt(animation);
+  timer1_enable(TIM_DIV1, TIM_EDGE, TIM_LOOP);
+  timer1_write((clockCyclesPerMicrosecond() * 500000) / 25);
+  interrupts();
+  */
 }
 
 
@@ -901,6 +982,8 @@ void loop(void) {
   // send heartbeat to server - 10min?
   // Manage display/LED
   // Manage buzzer
+
+  animation();
 
   // just in case
   yield();
