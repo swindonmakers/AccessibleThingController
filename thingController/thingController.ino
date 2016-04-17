@@ -12,6 +12,7 @@
 #include <TaskScheduler.h>
 #include <EEPROM.h>
 #include <Adafruit_NeoPixel.h>
+#include <Adafruit_SoftServo.h>
 
 /* ========================================================================== *
  *  Pinout
@@ -26,6 +27,10 @@
 #define OUTPUT_PIN        D6
 #define EXIT_BUTTON_PIN   D7  // normally open, pulled high
 #define NEOPIXEL_PIN      D8
+#define DOORBELL_PIN      A0
+#define DOORBELL_SERVO_PIN  D9
+
+#define DEBUG_CAPSENSE
 
 /* ========================================================================== *
  *  Enums
@@ -156,14 +161,19 @@ Task monitorExitButtonTask(1, TASK_FOREVER, &monitorExitButton);
 // scheduler
 Scheduler runner;
 
+// door
+boolean doorOpen = false;
+
 // output
 unsigned long outputEnableTimer;
-
-// exit button debounce - crappy hack
-unsigned long exitButtonTimer;
+unsigned long unlockCount = 0;
+boolean exitPressed = false;
 
 // neopixel
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(24, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
+// doorbell
+//Adafruit_SoftServo bell;
 
 
 /* ========================================================================== *
@@ -217,7 +227,11 @@ void uptime(boolean display = true)
     Serial.print(":");
     Serial.print(mins);
     Serial.print(":");
-    Serial.println(secs);
+    Serial.print(secs);
+
+    // unlock count
+    Serial.print(" - unlocked: ");
+    Serial.println(unlockCount);
   }
 }
 
@@ -225,12 +239,18 @@ void displayUptime() {
   uptime(true);
 }
 
+inline int max(int a,int b) {return ((a)>(b)?(a):(b)); }
+inline int min(int a,int b) {return ((a)<(b)?(a):(b)); }
+
+inline int clamp(int v, int minV, int maxV) {
+  return min(maxV, max(v, minV));
+}
 
 /* ========================================================================== *
  *  NEOPIXEL
  * ========================================================================== */
 
-void colorWipe(uint32_t c, uint8_t wait, uint8_t ) {
+void colorWipe(uint32_t c, uint8_t wait) {
   for(uint16_t i=0; i<strip.numPixels(); i++) {
     strip.setPixelColor(i, c);
     if (wait >0 ) {
@@ -243,18 +263,69 @@ void colorWipe(uint32_t c, uint8_t wait, uint8_t ) {
   }
 }
 
-void animation() {
-   if (isDoorUnlocked()) {
-      return;
-   }
+void segment(uint32_t c1, uint32_t c2, int start, int end) {
+  // turn all LEDs off (c2)
+  for(uint16_t i=0; i<strip.numPixels(); i++) {
+     strip.setPixelColor(i,c2);
+  }
   
-   // breath animation
-   static float tmr = 0;
-   tmr += 0.1;
+  // turn on the segment (c1)
+  for(int i=start; i<end+1; i++) {
+    int pix = i;
+    if (i < 0) i+=strip.numPixels();
+    strip.setPixelColor(i % strip.numPixels(), c1);
+  }
+  strip.show();
+}
 
-   uint8_t br = 25 * sin(tmr) + 50;
+void spinner(uint32_t c, uint8_t from, uint8_t reduce) {
+  // stating at LED from, fades from c to black, by reduce each LED
+  uint32_t c1 = c;
+  int r;
+  for (uint8_t i=0; i<strip.numPixels(); i++) {
+    r = (23 - i);
+    c1 = strip.Color(
+      clamp(((c >> 16) & 0xff) * r / 23, 0, 255),
+      clamp(((c >> 8) & 0xff) * r / 23, 0, 255),
+      clamp((c & 0xff) * r / 23, 0, 255)
+    );
+    int pix = from - i;
+    if (pix < 0) pix += 24;
+    strip.setPixelColor(pix % strip.numPixels(), c1);
+  }
+  strip.show();
+}
 
-   colorWipe(strip.Color(br, br /2, 0), 0);
+void animation() {
+   static int pos = 0;
+  
+   // only animate if the door is locked
+   if (isDoorUnlocked()) {
+      // countdown animation
+
+      if (millis() < outputEnableTimer) {
+        pos =  23 * (outputEnableTimer - millis()) / OUTPUT_ENABLE_DURATION;
+      } else {
+        pos = 0;
+      }
+
+      segment(strip.Color(0,255,0), 0, 4, pos + 4);
+
+      //reset pos to top postion 
+      pos = 4;
+      
+   } else {
+     // spinner animation
+     pos++;
+     if (pos > 23) pos = 0;
+  
+     uint32_t c = strip.Color(150,60,0);
+     if (WiFi.status() != WL_CONNECTED || doorOpen) {
+        c = strip.Color(150,0,0);  // red if no wifi or doorOpen
+     }
+  
+     spinner(c, pos, 5);
+     }
 }
 
 /* ========================================================================== *
@@ -265,7 +336,8 @@ void animation() {
 
 // duration in milliseconds
 void unlockDoor(unsigned long duration) {
-  Serial.println("Door Unlocked");
+  unlockCount++;
+  Serial.print("Door Unlocked, ");  Serial.println(unlockCount);
   digitalWrite(OUTPUT_PIN, LOW);
   outputEnableTimer = millis() + duration;
   // green when unlocked
@@ -273,11 +345,10 @@ void unlockDoor(unsigned long duration) {
 }
 
 void lockDoor() {
-  // TODO: sort inversion for diff modes
   Serial.println("Door Locked");
   digitalWrite(OUTPUT_PIN, HIGH);
   // return to orange
-  colorWipe(strip.Color(50, 25, 0), 50);
+  //colorWipe(strip.Color(50, 25, 0), 50);
 }
 
 // returns true if door unlocked
@@ -771,7 +842,7 @@ void lookForCard() {
         delay(1000);
 
         // orange
-        colorWipe(strip.Color(50, 25, 0), 25);
+        //colorWipe(strip.Color(50, 25, 0), 25);
       }
 
     } else {
@@ -785,7 +856,7 @@ void lookForCard() {
         delay(1000);
 
         // orange
-        colorWipe(strip.Color(50, 25, 0), 25);
+        //colorWipe(strip.Color(50, 25, 0), 25);
     }
 
   }
@@ -810,13 +881,12 @@ void keepWifiConnected() {
       // check again to see if connection established...
       WifiConnectionTask.setInterval(WIFI_CONNECTION_TASK_INTERVAL);
    } else {
-      Serial.print("WiFi -> OK, IP: ");
-      Serial.println(WiFi.localIP());
+      //Serial.print("WiFi -> OK, IP: ");
+      //Serial.println(WiFi.localIP());
 
       // sorted, shouldn't need to check again for a while
       WifiConnectionTask.setInterval(WIFI_CONNECTION_TASK_INTERVAL);
    }
-
 }
 
 
@@ -826,10 +896,6 @@ void keepWifiConnected() {
 
 // Task to keep an eye on the door sensor (reed switch)
 void monitorDoorSensor() {
-  static boolean doorOpen = false;
-
-  //Serial.println(digitalRead(DOOR_SENSOR_PIN));
-
   // Switch is to ground, with internal pullup enabled...
   // sensor value: 0 = closed, 1 = open
   boolean newDoorOpen = digitalRead(DOOR_SENSOR_PIN);
@@ -842,8 +908,7 @@ void monitorDoorSensor() {
       Serial.println("Door opened");
 
       // Compare to lock status...  scream if not expected to be opened!!
-      // also check to see if the exit button was pressed recently...
-      if (!isDoorUnlocked() && ( millis() > exitButtonTimer+100 ) ) {
+      if (!isDoorUnlocked() ) {
         Serial.println("AAARRGH: Door opened, but should be locked!!!");
         //sendTelegramMsg("AARGH someone has forced the door open");
       }
@@ -859,26 +924,64 @@ void monitorDoorSensor() {
  * ========================================================================== */
 
 void exitButtonISR() {
-  //Serial.println("Exit button pressed");
-  //unlockDoor(OUTPUT_ENABLE_DURATION);
-
-  // crappy debounce
-  // TODO: make not crappy... ideally by not needing a debounce
-  // note the time the ISR was triggered, poll in main loop to see if still pressed
-  exitButtonTimer = millis();
+  // can't do too much in the ISR, or it causes an excpetion
+  // so just set a flag, and actually unlock the door from a
+  // normal task
+  exitPressed = true;
 }
 
 void monitorExitButton() {
-    // see if the exit button is currently pressed, note inverted input
-    if (!digitalRead(EXIT_BUTTON_PIN)) {
-      // crappy debounce:
-      // make sure it's been at least 30ms since the ISR was triggered
-      if (exitButtonTimer + 30 < millis()) {
-        Serial.println("Exit button pressed");
-        unlockDoor(OUTPUT_ENABLE_DURATION);
-      }
+    if (exitPressed) {
+      exitPressed = false;
+      Serial.println("Exit button pressed");
+      unlockDoor(OUTPUT_ENABLE_DURATION);
     }
 }
+
+
+/* ========================================================================== *
+ *  Doorbell
+ * ========================================================================== */
+
+void servoDelay(unsigned long m) {
+  unsigned long stopAt = millis() + m;
+  while(millis() < stopAt) {
+    delay(10);
+    //bell.refresh();
+  }
+}
+
+void monitorDoorbell() {
+  
+  int sensorValue = analogRead(DOORBELL_PIN);
+
+  if (sensorValue < 500) {
+    colorWipe(strip.Color(0, 0, 255), 0);
+    
+    Serial.println("bing bong");
+
+
+    digitalWrite(DOORBELL_SERVO_PIN, LOW);
+    delay(500);
+
+    digitalWrite(DOORBELL_SERVO_PIN, HIGH);
+    /*
+    for (uint8_t i=0; i<8; i++) {
+      bell.write(100);
+      servoDelay(250);
+      bell.write(0);
+      servoDelay(250);
+    }
+
+    // reset
+    bell.write(100);
+    */
+  } 
+
+  //bell.refresh();
+}
+
+
 
 /* ========================================================================== *
  *  Setup
@@ -891,6 +994,7 @@ void setup(void) {
   WiFi.setAutoReconnect(false);
 
   // configure pins
+  pinMode(BUILTIN_LED, OUTPUT);
   pinMode(PN532_RESET_PIN, OUTPUT);
   //pinMode(PN532_IRQ_PIN, INPUT_PULLUP);
   pinMode(DOOR_SENSOR_PIN, INPUT_PULLUP);
@@ -941,7 +1045,7 @@ void setup(void) {
   // Enable tasks
   WifiConnectionTask.enableDelayed(30000);  // enough time to open the door before potential watchdog reset
   RFIDConnectionTask.enable();
-  lookForCardTask.enableDelayed(2000);
+  lookForCardTask.enable();
   displayUptimeTask.enable();
   syncCacheTask.enable();
   monitorOutputTask.enable();
@@ -951,18 +1055,14 @@ void setup(void) {
   Serial.println("Ready");
   Serial.println();
   
-  // orange boot sequence
-  colorWipe(strip.Color(50, 25, 0), 50);
 
-  // start animation timer
-  /*
-  noInterrupts();
-  timer1_isr_init();
-  timer1_attachInterrupt(animation);
-  timer1_enable(TIM_DIV1, TIM_EDGE, TIM_LOOP);
-  timer1_write((clockCyclesPerMicrosecond() * 500000) / 25);
-  interrupts();
-  */
+  // doorbell
+  pinMode(DOORBELL_PIN, INPUT);
+  pinMode(DOORBELL_SERVO_PIN, OUTPUT);
+  digitalWrite(DOORBELL_SERVO_PIN, HIGH);
+  
+  //bell.attach(DOORBELL_SERVO_PIN);
+  //bell.write(100);
 }
 
 
@@ -980,10 +1080,15 @@ void loop(void) {
   // TODO:
   // I've rebooted log msg
   // send heartbeat to server - 10min?
-  // Manage display/LED
   // Manage buzzer
 
+  // TODO: stick this in a task?
   animation();
+
+  monitorDoorbell();
+  
+  // visual comfort
+  digitalWrite(BUILTIN_LED, !digitalRead(BUILTIN_LED));
 
   // just in case
   yield();
