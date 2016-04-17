@@ -27,7 +27,7 @@
 #define EXIT_BUTTON_PIN   D7  // normally open, pulled high
 #define NEOPIXEL_PIN      D8
 #define DOORBELL_PIN      A0
-#define DOORBELL_SERVO_PIN  D9
+#define DOORBELL_ALARM_PIN  D9
 
 #define DEBUG_CAPSENSE
 
@@ -172,7 +172,8 @@ boolean exitPressed = false;
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(24, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
 // doorbell
-//Adafruit_SoftServo bell;
+unsigned long doorbellTimer = 0;
+boolean doorbellOn = false;
 
 
 /* ========================================================================== *
@@ -297,8 +298,9 @@ void spinner(uint32_t c, uint8_t from, uint8_t reduce) {
 
 void animation() {
    static int pos = 0;
-  
-   // only animate if the door is locked
+
+   // animation changes based on lock and doorbell states
+
    if (isDoorUnlocked()) {
       // countdown animation
 
@@ -310,21 +312,35 @@ void animation() {
 
       segment(strip.Color(0,255,0), 0, 4, pos + 4);
 
-      //reset pos to top postion 
+      //reset pos to top postion, so that spinner always resumes from right position
       pos = 4;
       
+   } else if (doorbellOn) {
+    // doorbell on
+
+    // do nothing, LEDs should already be blue as set by the doorbell task
+    
    } else {
-     // spinner animation
-     pos++;
-     if (pos > 23) pos = 0;
+    
+     // normal spinner animation
+
+     // clockwise if wifi connected
+     if (WiFi.status() == WL_CONNECTED) {
+        pos++;
+        if (pos > 23) pos = 0;
+     } else {
+        // anti-clockwise if not
+        pos--;
+        if (pos < 0) pos = 23;
+     }
   
      uint32_t c = strip.Color(150,60,0);
-     if (WiFi.status() != WL_CONNECTED || doorOpen) {
-        c = strip.Color(150,0,0);  // red if no wifi or doorOpen
+     if (doorOpen) {
+        c = strip.Color(150,0,0);  // red if doorOpen
      }
   
      spinner(c, pos, 5);
-     }
+   }
 }
 
 /* ========================================================================== *
@@ -942,44 +958,29 @@ void monitorExitButton() {
  *  Doorbell
  * ========================================================================== */
 
-void servoDelay(unsigned long m) {
-  unsigned long stopAt = millis() + m;
-  while(millis() < stopAt) {
-    delay(10);
-    //bell.refresh();
-  }
-}
-
 void monitorDoorbell() {
-  
   int sensorValue = analogRead(DOORBELL_PIN);
 
+  // turn doorbell on?
   if (sensorValue < 500) {
     colorWipe(strip.Color(0, 0, 255), 0);
     
-    Serial.println("bing bong");
+    Serial.println("Bing bong");
 
+    digitalWrite(DOORBELL_ALARM_PIN, LOW);
 
-    digitalWrite(DOORBELL_SERVO_PIN, LOW);
-    delay(500);
+    doorbellTimer = millis() + 500; 
+    doorbellOn = true;
+  }
 
-    digitalWrite(DOORBELL_SERVO_PIN, HIGH);
-    /*
-    for (uint8_t i=0; i<8; i++) {
-      bell.write(100);
-      servoDelay(250);
-      bell.write(0);
-      servoDelay(250);
-    }
+  // turn doorbell off?
+  if (doorbellOn && millis() > doorbellTimer) {
+    Serial.println("Doorbell off");
+    doorbellOn = false;
 
-    // reset
-    bell.write(100);
-    */
-  } 
-
-  //bell.refresh();
+    digitalWrite(DOORBELL_ALARM_PIN, HIGH);
+  }
 }
-
 
 
 /* ========================================================================== *
@@ -1057,11 +1058,8 @@ void setup(void) {
 
   // doorbell
   pinMode(DOORBELL_PIN, INPUT);
-  pinMode(DOORBELL_SERVO_PIN, OUTPUT);
-  digitalWrite(DOORBELL_SERVO_PIN, HIGH);
-  
-  //bell.attach(DOORBELL_SERVO_PIN);
-  //bell.write(100);
+  pinMode(DOORBELL_ALARM_PIN, OUTPUT);
+  digitalWrite(DOORBELL_ALARM_PIN, HIGH);
 }
 
 
@@ -1079,11 +1077,9 @@ void loop(void) {
   // TODO:
   // I've rebooted log msg
   // send heartbeat to server - 10min?
-  // Manage buzzer
 
-  // TODO: stick this in a task?
+  // TODO: stick these in tasks
   animation();
-
   monitorDoorbell();
   
   // visual comfort
