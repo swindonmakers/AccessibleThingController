@@ -12,7 +12,6 @@
 #include <TaskScheduler.h>
 #include <EEPROM.h>
 #include <Adafruit_NeoPixel.h>
-#include <Adafruit_SoftServo.h>
 
 /* ========================================================================== *
  *  Pinout
