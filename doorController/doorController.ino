@@ -1,33 +1,33 @@
-// Enable WIFI debugging
-#define DEBUG_ESP_PORT Serial
-#define DDEBUG_ESP_CORE
-#define DDEBUG_ESP_WIFI
+#include <pin_magic.h>
+#include <registers.h>
 
-#include <ArduinoJson.h>
-#include <ESP8266WiFi.h>
-#include <WiFiClientSecure.h>
 #include <Wire.h>
 #include <PN532_I2C.h>
 #include <PN532.h>
 #include <TaskScheduler.h>
 #include <EEPROM.h>
 #include <Adafruit_NeoPixel.h>
+#include <SoftwareSerial.h>
+#include <avr/pgmspace.h>
+#include <avr/wdt.h>
 
 /* ========================================================================== *
  *  Pinout
  * ========================================================================== */
 // NB: Do not use D0 or D2, these need to be pulled high by 10k resistors to ensure correct
 //     boot sequence following watchdog/internal reset
-#define I2C_DATA_PIN      D3
-#define I2C_CLOCK_PIN     D1
-#define PN532_RESET_PIN   D4
+#define I2C_DATA_PIN      A4
+#define I2C_CLOCK_PIN     A5
+#define PN532_RESET_PIN   4
 //#define PN532_IRQ_PIN     ?
-#define DOOR_SENSOR_PIN   D5
-#define OUTPUT_PIN        D6
-#define EXIT_BUTTON_PIN   D7  // normally open, pulled high
-#define NEOPIXEL_PIN      D8
+#define DOOR_SENSOR_PIN   5
+#define OUTPUT_PIN        6
+#define EXIT_BUTTON_PIN   3  // normally open, pulled high
+#define NEOPIXEL_PIN      8
 #define DOORBELL_PIN      A0
-#define DOORBELL_ALARM_PIN  D9
+#define DOORBELL_ALARM_PIN  9
+#define BUILTIN_LED       13
+#define ESP_RESET_PIN     12
 
 #define DEBUG_CAPSENSE
 
@@ -41,18 +41,8 @@
  * ========================================================================== */
 
 #define VERSION           "0.1"
-#define EEPROM_MAGIC      2  // update to clear EEPROM on restart
-#define THING_ID          "1A9E3D66-E90F-11E5-83C1-1E346D398B53"
-#define THING_NAME        "DOOR"
-#define CONTROL_MODE      MODE_DOOR
-#define NETWORK_SSID      "swindon-makerspace"
-#define NETWORK_PASSWORD  "makeallthethings"
-#define SERVER_HOST       "192.168.1.70"
-#define SERVER_PORT       3000
-#define SERVER_URLPREFIX  "/"
-// http://www.swindon-makerspace.org/api/telegram/?msg=i+do+not+spellz+good&groupid=-20679102
-#define TELEGRAM_HOST     "www.swindon-makerspace.org"
-#define WIFI_CONNECTION_TASK_INTERVAL   60000 // milliseconds
+#define EEPROM_MAGIC      3  // update to clear EEPROM on restart
+#define ESP_CONNECTION_TASK_INTERVAL   10000 // milliseconds
 #define RFID_CONNECTION_TASK_INTERVAL   10000 // milliseconds
 #define LOOKFORCARD_TASK_INTERVAL       100   // milliseconds
 #define SYNC_CACHE_TASK_INTERVAL        600000 // milliseconds
@@ -60,14 +50,13 @@
 #define MONITOROUTPUT_TASK_INTERVAL     500   // milliseconds
 #define CARD_DEBOUNCE_DELAY             2000  // milliseconds
 #define PN532_READ_TIMEOUT              50   // milliseconds
-#define CACHE_SIZE        32
+#define CACHE_SIZE        32    // number of tokens held in cache (memory and EEPROM)
 #define CACHE_SYNC        240   // resync cache after <value> x 10 minutes
 
 #define OUTPUT_ENABLE_DURATION          10000 // milliseconds
 
-IPAddress ip(192,168,1,253);  //Node static IP
-IPAddress gateway(192,168,1,254);
-IPAddress subnet(255,255,255,0);
+#define MAXINPUTCHARS   20   // size of ESP serial incoming buffer
+
 
 /* ========================================================================== *
  *  Types / Structures
@@ -104,7 +93,7 @@ struct TOKEN_CACHE_ITEM {
     uint16_t count;   // scan count
     uint8_t sync;     // countdown to resync with cache with server
 };
-// stored size = 9 bytes
+// in memory = 12 bytes, EEPROM size = 9 bytes
 
 
 /* ========================================================================== *
@@ -112,7 +101,7 @@ struct TOKEN_CACHE_ITEM {
  * ========================================================================== */
 
 // tasks
-void keepWifiConnected();
+void keepESPConnected();
 void keepRFIDConnected();
 void lookForCard();
 void displayUptime();
@@ -123,7 +112,8 @@ void monitorExitButton();
 void animation();
 
 // other prototypes
-uint8_t queryServer(String cardID);
+uint8_t queryServer();
+uint8_t handleSerial();
 boolean isDoorUnlocked();
 
 void syncEEPROM();
@@ -132,14 +122,13 @@ void syncEEPROM();
  *  Global Variables / Objects
  * ========================================================================== */
 
-const char* ssid     = NETWORK_SSID;
-const char* password = NETWORK_PASSWORD;
-const char* host = SERVER_HOST;
-const int hostPort = SERVER_PORT;
-
 PN532_I2C pn532i2c(Wire, I2C_DATA_PIN, I2C_CLOCK_PIN);  // data, clock
 PN532 nfc(pn532i2c);
 uint16_t PN532Resets = 0;  // reset counter
+
+// ESP serial
+SoftwareSerial ESPSerial(10, 11);
+unsigned long lastHB;
 
 // the cache
 TOKEN_CACHE_ITEM cache[CACHE_SIZE];
@@ -147,15 +136,19 @@ TOKEN_CACHE_ITEM cache[CACHE_SIZE];
 // number of items in cache
 uint8_t cacheSize = 0;
 
+// Serial handling
+//char inputString[20] = "";         // a string to hold incoming data
+uint8_t inputChars = 0;
+String inputString;
+boolean stringComplete = false;  // whether the string is complete
+
 // tasks
-Task WifiConnectionTask(WIFI_CONNECTION_TASK_INTERVAL, TASK_FOREVER, &keepWifiConnected);
+Task ESPConnectionTask(ESP_CONNECTION_TASK_INTERVAL, TASK_FOREVER, &keepESPConnected);
 Task RFIDConnectionTask(RFID_CONNECTION_TASK_INTERVAL, TASK_FOREVER, &keepRFIDConnected);
-Task lookForCardTask(LOOKFORCARD_TASK_INTERVAL, TASK_FOREVER, &lookForCard);
+//Task lookForCardTask(LOOKFORCARD_TASK_INTERVAL, TASK_FOREVER, &lookForCard);
 Task displayUptimeTask(60000, TASK_FOREVER, &displayUptime);
 Task syncCacheTask(SYNC_CACHE_TASK_INTERVAL, TASK_FOREVER, &syncCache);
-Task monitorDoorSensorTask(MONITORDOORSENSOR_TASK_INTERVAL, TASK_FOREVER, &monitorDoorSensor);
-Task monitorOutputTask(MONITOROUTPUT_TASK_INTERVAL, TASK_FOREVER, &monitorOutput);
-Task monitorExitButtonTask(1, TASK_FOREVER, &monitorExitButton);
+//Task monitorDoorSensorTask(MONITORDOORSENSOR_TASK_INTERVAL, TASK_FOREVER, &monitorDoorSensor);
 
 // scheduler
 Scheduler runner;
@@ -175,20 +168,33 @@ Adafruit_NeoPixel strip = Adafruit_NeoPixel(24, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ8
 unsigned long doorbellTimer = 0;
 boolean doorbellOn = false;
 
+// token as hex string
+char tokenStr[14];
 
 /* ========================================================================== *
  *  Utility Functions
  * ========================================================================== */
 
-String byteArrayToHexString(const uint8_t *data, const uint32_t numBytes) {
-  String res = "";
+void updateTokenStr(const uint8_t *data, const uint32_t numBytes) {
+  const char * hex = "0123456789abcdef";
+  uint8_t b = 0;
   for (uint8_t i = 0; i < numBytes; i++) {
-        res += String(data[i], HEX);
-    }
-  return res;
+        tokenStr[b] = hex[(data[i]>>4)&0xF];
+        b++;
+        tokenStr[b] = hex[(data[i])&0xF];
+        b++;
+  }
+
+  // null remaining bytes in string
+  for (uint8_t i=numBytes; i < 7; i++) {
+        tokenStr[b] = 0;
+        b++;
+        tokenStr[b] = 0;
+        b++;
+  }
 }
 
-void uptime(boolean display = true)
+void uptime(Stream& serial, boolean display = true)
 {
   static uint16_t rollover = 0;  // to count timer rollovers
   static boolean highMillis = false;
@@ -217,30 +223,29 @@ void uptime(boolean display = true)
 
   //Display results
   if (display) {
-    Serial.print("Uptime: ");
+    serial.print(F("Uptime:"));
     if (days>0) // days will displayed only if value is greater than zero
     {
-        Serial.print(days);
-        Serial.print("d ");
+        serial.print(days);
+        serial.print("d");
     }
-    Serial.print(hours);
-    Serial.print(":");
-    Serial.print(mins);
-    Serial.print(":");
-    Serial.print(secs);
+    serial.print(hours);
+    serial.print(':');
+    serial.print(mins);
+    serial.print(':');
+    serial.print(secs);
 
     // unlock count
-    Serial.print(" - unlocked: ");
-    Serial.println(unlockCount);
+    serial.print(F("_unlocked:"));
+    serial.print(unlockCount);
+    serial.print('\n');
   }
 }
 
 void displayUptime() {
-  uptime(true);
+  uptime(Serial, true);
 }
 
-inline int max(int a,int b) {return ((a)>(b)?(a):(b)); }
-inline int min(int a,int b) {return ((a)<(b)?(a):(b)); }
 
 inline int clamp(int v, int minV, int maxV) {
   return min(maxV, max(v, minV));
@@ -324,8 +329,8 @@ void animation() {
     
      // normal spinner animation
 
-     // clockwise if wifi connected
-     if (WiFi.status() == WL_CONNECTED) {
+     // clockwise if ESP connected
+     if (true) {
         pos++;
         if (pos > 23) pos = 0;
      } else {
@@ -352,7 +357,7 @@ void animation() {
 // duration in milliseconds
 void unlockDoor(unsigned long duration) {
   unlockCount++;
-  Serial.print("Door Unlocked, ");  Serial.println(unlockCount);
+  Serial.print(F("Door Unlocked, "));  Serial.println(unlockCount);
   digitalWrite(OUTPUT_PIN, LOW);
   outputEnableTimer = millis() + duration;
   // green when unlocked
@@ -360,7 +365,7 @@ void unlockDoor(unsigned long duration) {
 }
 
 void lockDoor() {
-  Serial.println("Door Locked");
+  Serial.println(F("Door Locked"));
   digitalWrite(OUTPUT_PIN, HIGH);
   // return to orange
   //colorWipe(strip.Color(50, 25, 0), 50);
@@ -433,7 +438,7 @@ TOKEN_CACHE_ITEM* addTokenToCache(TOKEN* token, uint8_t length, uint8_t flags) {
   syncEEPROM();
 
   // print number of cache slots used
-  Serial.print("Cache used: ");
+  Serial.print(F("Cache used: "));
   Serial.print(cacheSize);
   Serial.print('/');
   Serial.println(CACHE_SIZE);
@@ -442,24 +447,31 @@ TOKEN_CACHE_ITEM* addTokenToCache(TOKEN* token, uint8_t length, uint8_t flags) {
   return &cache[pos];
 }
 
-void initCache() {
-  Serial.println("Loading cache from EEPROM...");
+// pass item to remove
+void removeTokenFromCache(TOKEN_CACHE_ITEM* item) {
+  item->length = 0;
+  item->flags = 0;
+  item->count = 0;
+  item->sync = CACHE_SYNC;
+}
 
-  EEPROM.begin(2 + 8 * CACHE_SIZE);
+void initCache() {
+  Serial.println(F("Loading cache from EEPROM..."));
+
+  EEPROM.begin();
 
   // read magic
   if (EEPROM.read(0) != EEPROM_MAGIC) {
-    Serial.println("Magic changed, resetting cache");
+    Serial.println(F("Magic changed, resetting cache"));
     // reset stored cache size
     EEPROM.write(0, EEPROM_MAGIC);
     EEPROM.write(1, 0);
-    EEPROM.commit();
 
     cacheSize = 0;
   } else {
     cacheSize = EEPROM.read(1);
     Serial.print(cacheSize);
-    Serial.println(" items");
+    Serial.println(F(" items"));
   }
 
   // read token items from cache
@@ -477,25 +489,23 @@ void initCache() {
     // flags
     cache[i].flags = EEPROM.read(addr + 8);
 
-    Serial.print("  ");
-    Serial.print(byteArrayToHexString(cache[i].token, cache[i].length));
-    Serial.print(" : ");
+    updateTokenStr(cache[i].token, cache[i].length);
+
+    Serial.print(' ');
+    Serial.print(tokenStr);
+    Serial.print(':');
     Serial.println(cache[i].flags);
 
     cache[i].count = 0;
-    cache[i].sync = 2 + i;  // resync everything soon-ish
+    cache[i].sync = 1 + i;  // resync everything soon-ish
 
     addr += 9;
   }
 }
 
 // task to update permission flags in cache, e.g. if someones access has changed
+// called every 10min ish
 void syncCache() {
-  // give up if we don't have a valid wifi connection
-  if ( WiFi.status() != WL_CONNECTED ) {
-     return;
-   }
-
   // for each item in cache
   uint8_t i;
   for (i=0; i<cacheSize; i++) {
@@ -503,17 +513,23 @@ void syncCache() {
     cache[i].sync--;
 
     // if reached zero
-    if (cache[i].sync == 0) {
-      Serial.print("Syncing cached flags for: ");
-      Serial.println(byteArrayToHexString(cache[i].token, cache[i].length));
+    if (cache[i].sync == 0 && cache[i].length > 0) {
+      Serial.print(F("Syncing cached flags for: "));
+      updateTokenStr(cache[i].token, cache[i].length);
+      Serial.println(tokenStr);
 
       // query permission flags from server
-      uint8_t flags = queryServer(byteArrayToHexString(cache[i].token, cache[i].length));
+      uint8_t flags = queryServer();
 
       if (flags != TOKEN_ERROR) {
+        if (flags > 0) {
          // if successful, update flags and reset sync counter
          cache[i].flags = flags;
          cache[i].sync = CACHE_SYNC;
+        } else {
+          // else remove token
+          removeTokenFromCache(&cache[i]);
+        }
       } else {
         // else try again next cycle
         cache[i].sync = 1;
@@ -524,12 +540,17 @@ void syncCache() {
 
   // sync changes to EEPROM
   syncEEPROM();
+
+  // send uptime log to server via ESP
+  ESPSerial.print('!');
+  uptime(ESPSerial, true);
 }
 
 
 // update a byte of EEPROM memory, return true if changed
 boolean updateEEPROM(int address, uint8_t value) {
   boolean changed = EEPROM.read(address) != value;
+  // TODO: rework for Arduino EEPROM
   if (changed) {
     EEPROM.write(address, value);
   }
@@ -561,168 +582,41 @@ void syncEEPROM() {
   }
 
   if (changed) {
-    Serial.println("Updating EEPROM");
-    EEPROM.commit();
+    Serial.println(F("Updating EEPROM"));
   }
 }
 
 
 /* ========================================================================== *
- *  HTTP Client
+ *  ESP Interface
  * ========================================================================== */
 
 // query server for token, and return flags
-uint8_t queryServer(String cardID) {
-   // TODO: Rewrite/refactor
+uint8_t queryServer() {
    uint8_t flags = 0;
 
-   // check if connected
-   if ( WiFi.status() != WL_CONNECTED ) {
-     Serial.println("Error: WiFi Not Connected");
-     return TOKEN_ERROR;
-   }
+   // send query to ESP
+   ESPSerial.print('?');
+   ESPSerial.print(tokenStr);
+   ESPSerial.print('\n');
 
-   Serial.print("Querying server: ");
-   Serial.println(host);
-
-   // Use WiFiClient class to create TCP connections
-   WiFiClient client;
-   if (!client.connect(host, hostPort)) {
-     Serial.println("Error: Connection failed");
-     return TOKEN_ERROR;
-   }
-
-   // We now create a URI for the request
-   String url = SERVER_URLPREFIX;
-   url += "verify";
-   url += "?token=";
-   url += cardID;
-   url += "&thing=";
-   url += THING_ID;
-
-   Serial.print("Requesting URL: ");
-   Serial.println(url);
-
-   // This will send the request to the server
-   client.print(String("GET ") + url + " HTTP/1.1\r\n" +
-                "Host: " + host + "\r\n" +
-                "Connection: close\r\n\r\n");
-   int checkCounter = 0;
-   while (!client.available() && checkCounter < 3000) {
-     delay(10);
-     checkCounter++;
-   }
-
-   // Read reply and decode json
-   while(client.available()){
-     // TODO: Replace with better/more robust streaming HTTP header parser
-     String json;
-     boolean endOfHeaders = false;
-     while (!endOfHeaders && client.available()) {
-       // feed the watchdog
-       yield();
-       json = client.readStringUntil('\n');
-       Serial.print("_");
-       Serial.print(json);
-       if (json == "") endOfHeaders = true;
-     }
-     Serial.println("json:");
-     Serial.println(json);
-
-     StaticJsonBuffer<200> jsonBuffer;
-
-     JsonObject& root = jsonBuffer.parseObject(json);
-
-     // Test if parsing succeeds.
-     if (!root.success()) {
-       Serial.println("Error: Couldn't parse JSON");
-       return TOKEN_ERROR;
-     }
-
-     // Check json response for access permission
-     if (root["access"] == 1) {
-       flags |= TOKEN_ACCESS;
-     }
-
-     if (root["trainer"] == 1) {
-       flags |= TOKEN_TRAINER;
-     }
-   }
-
-   // close connection
-   client.stop();
-
+   // wait for reply, no more than 4 seconds
+   unsigned long giveUp = millis() + 4000;
+ 
+   do {
+      flags = handleSerial();
+   } while (flags ==0 && millis() < giveUp);
+   
    return flags;
 }
 
 
 // send a log msg to the server, fire and forget
-void sendLogMsg(String msg) {
-   Serial.print("Sending log to server: ");
-   Serial.println(host);
-
-   // check if connected
-   if ( WiFi.status() != WL_CONNECTED ) {
-    Serial.println("Error: WiFi Not Connected");
-    return;
-   }
-
-   WiFiClient client;
-   if (!client.connect(host, hostPort)) {
-     Serial.println("Error: Connection failed");
-     return;
-   }
-
-   String url = SERVER_URLPREFIX;
-   url += "msglog?thing=";
-   url += THING_ID;
-   url += "&msg=";
-   url += msg;
-
-   Serial.println(url);
-
-   // This will send the request to the server
-   client.print(String("GET ") + url + " HTTP/1.1\r\n" +
-                "Host: " + host + "\r\n" +
-                "Connection: close\r\n\r\n");
-
-   // don't care if it succeeds, so close connection and return
-   client.flush();
-   client.stop();
-   return;
-}
-
-
-// TODO: Fix this, has stopped working?!?
-void sendTelegramMsg(String msg) {
-   Serial.print("Sending msg to telegram");
-
-   // check if connected
-   if ( WiFi.status() != WL_CONNECTED ) {
-    Serial.println("Error: WiFi Not Connected");
-    return;
-   }
-
-   WiFiClient client;
-   if (!client.connect(TELEGRAM_HOST, 80)) {
-     Serial.println("Error: Connection failed");
-     return;
-   }
-
-   String url = "/api/telegram/?groupid=-20679102&msg=";
-   url += msg;
-
-   Serial.println(url);
-
-   // This will send the request to the server
-   client.print(String("GET ") + url + " HTTP/1.1\r\n" +
-                "Host: " + TELEGRAM_HOST + "\r\n" +
-                "Connection: close\r\n\r\n");
-
-   // don't care if it succeeds, so close connection and return
-   client.flush();
-   client.stop();
-   return;
+void sendLogMsg(String msg1, String msg2) {
+   ESPSerial.print('!');
+   ESPSerial.print(msg1);
+   ESPSerial.print(msg2);
+   ESPSerial.print('\n');
 }
 
 
@@ -740,7 +634,7 @@ void resetPN532() {
   // inc reset counter
   PN532Resets++;
 
-  Serial.print("PN532 reset: ");  Serial.println(PN532Resets);
+  Serial.print(F("PN532 reset: "));  Serial.println(PN532Resets);
 
   nfc.begin();
 
@@ -770,7 +664,7 @@ void keepRFIDConnected() {
    uint32_t versiondata = nfc.getFirmwareVersion();
 
    if (! versiondata) {
-      Serial.println("PN532 -> Error - Resetting");
+      Serial.println(F("PN532 -> Error - Resetting"));
 
       // Reset the PN532 if it locks up
       resetPN532();
@@ -796,38 +690,45 @@ void lookForCard() {
 
   TOKEN_CACHE_ITEM* item;
 
-  //Serial.print(".");
-
   // Wait for an ISO14443A type cards (Mifare, etc.).  When one is found
   // 'uid' will be populated with the UID, and uidLength will indicate
   // if the uid is 4 bytes (Mifare Classic) or 7 bytes (Mifare Ultralight)
   success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, PN532_READ_TIMEOUT);
 
-  if (success && (memcmp(luid, uid, 7)!=0 || millis() > lastChecked + CARD_DEBOUNCE_DELAY)) {
+  if (success && (memcmp(luid, uid, uidLength)!=0 || (millis() > lastChecked + CARD_DEBOUNCE_DELAY))) {
 
     // store the uid to permit debounce
-    memcpy(luid, uid, 7);
+    memcpy(luid, uid, uidLength);
 
     lastChecked = millis();
 
-    Serial.print("Card found, token: ");  Serial.println(byteArrayToHexString(uid, uidLength));
-
-    // blue - found card
-    colorWipe(strip.Color(255, 128, 0), 1);
+    updateTokenStr(uid, uidLength);
+    
+    Serial.print(F("Card found: "));  Serial.println(tokenStr);
+    Serial.println(uidLength);
 
     // check cache
     item = getTokenFromCache(&uid, uidLength);
 
     //if not found, then query server and add to cache if has permission
     if (item == NULL) {
-      Serial.println("Not in cache");
-      uint8_t flags = queryServer(byteArrayToHexString(uid, uidLength));
+      Serial.println(F("Not in cache"));
+      
+      // bright orange - found card, querying server
+      colorWipe(strip.Color(255, 128, 0), 0);
+    
+      uint8_t flags = queryServer();
       Serial.println(flags);
       if ((flags > 0) && (flags != TOKEN_ERROR)) {
         item = addTokenToCache(&uid, uidLength, flags);
       }
     } else {
-      Serial.println("In cache");
+      Serial.println(F("In cache"));
+      // double check it's a valid item
+      if (item->flags == 0) {
+        removeTokenFromCache(item);
+        item = NULL;
+      }
     }
 
     // if got valid details and permission given, then open/power the thing, if not, don't
@@ -838,40 +739,34 @@ void lookForCard() {
         // permission given, so open/power the thing
         item->count++;
 
-        Serial.print("Permission granted: ");
+        Serial.print(F("Permission granted: "));
         Serial.println(item->count);
         unlockDoor(OUTPUT_ENABLE_DURATION);
 
-        sendLogMsg("Permission%20granted%20to:%20" + byteArrayToHexString(uid, uidLength));
+        sendLogMsg(F("Permission%20granted%20to:%20"), tokenStr);
         
         //sendTelegramMsg("Door opened");
 
       } else {
         // permission denied!
-        Serial.println("Permission denied");
-        sendLogMsg("Permission%20denied%20to:%20" + byteArrayToHexString(uid, uidLength));
+        Serial.println(F("Permission denied"));
+        sendLogMsg(F("Permission%20denied%20to:%20"), tokenStr);
 
         // red
-        colorWipe(strip.Color(255, 0, 0), 5);
+        colorWipe(strip.Color(255, 0, 0), 0);
 
         delay(1000);
-
-        // orange
-        //colorWipe(strip.Color(50, 25, 0), 25);
       }
 
     } else {
       // permission denied!
-        Serial.println("Permission denied");
-        sendLogMsg("Permission%20denied%20to:%20" + byteArrayToHexString(uid, uidLength));
+        Serial.println(F("Permission denied"));
+        sendLogMsg(F("Permission%20denied%20to:%20"), tokenStr);
 
         // red
-        colorWipe(strip.Color(255, 0, 0), 5);
+        colorWipe(strip.Color(255, 0, 0), 0);
 
         delay(1000);
-
-        // orange
-        //colorWipe(strip.Color(50, 25, 0), 25);
     }
 
   }
@@ -879,28 +774,32 @@ void lookForCard() {
 
 
 /* ========================================================================== *
- *  WiFi Client
+ *  ESP Client
  * ========================================================================== */
 
-// Task to keep wifi connected
-void keepWifiConnected() {
+void resetESP() {
+  digitalWrite(ESP_RESET_PIN, HIGH);
+  delay(10);
+  digitalWrite(ESP_RESET_PIN, LOW);
+  delay(10);
+  digitalWrite(ESP_RESET_PIN, HIGH);
+  // reset the HB timer...  give the ESP a chance to reboot
+  lastHB = millis();
+}
 
-   if (WiFi.status() != WL_CONNECTED) {
-      Serial.print("WiFi -> Connecting to: ");  Serial.println(ssid);
+// Task to keep ESP connected
+void keepESPConnected() {
+   // send HB
+   ESPSerial.print("~\n");
+   Serial.println("HB");
 
-      WiFi.disconnect(true); // abandon any previous connection attempt
-      WiFi.mode(WIFI_STA);  // force mode to STA only
-      WiFi.begin(ssid, password);  // try again
-      WiFi.config(ip, gateway, subnet);  // use static IP as more stable/faster than DHCP
+   // NB: Heartbeats are received in the serial handling loop
 
-      // check again to see if connection established...
-      WifiConnectionTask.setInterval(WIFI_CONNECTION_TASK_INTERVAL);
-   } else {
-      //Serial.print("WiFi -> OK, IP: ");
-      //Serial.println(WiFi.localIP());
-
-      // sorted, shouldn't need to check again for a while
-      WifiConnectionTask.setInterval(WIFI_CONNECTION_TASK_INTERVAL);
+   // check how long since last HB
+   if (millis() > lastHB + 30000) {
+      // been ages, so reset ESP
+      Serial.println(F("Resetting ESP..."));
+      resetESP();
    }
 }
 
@@ -920,16 +819,16 @@ void monitorDoorSensor() {
     doorOpen = newDoorOpen;
 
     if (doorOpen) {
-      Serial.println("Door opened");
+      Serial.println(F("Door opened"));
 
       // Compare to lock status...  scream if not expected to be opened!!
       if (!isDoorUnlocked() ) {
-        Serial.println("AAARRGH: Door opened, but should be locked!!!");
+        Serial.println(F("AAARRGH: Door opened unexpectedly!"));
         //sendTelegramMsg("AARGH someone has forced the door open");
       }
 
     } else {
-      Serial.println("Door closed");
+      Serial.println(F("Door closed"));
     }
   }
 }
@@ -942,7 +841,12 @@ void exitButtonISR() {
   // can't do too much in the ISR, or it causes an excpetion
   // so just set a flag, and actually unlock the door from a
   // normal task
-  exitPressed = true;
+  
+  // debounce
+  delay(2);
+  if (!digitalRead(EXIT_BUTTON_PIN)) {
+    exitPressed = true;
+  }
 }
 
 void monitorExitButton() {
@@ -965,7 +869,7 @@ void monitorDoorbell() {
   if (sensorValue < 500) {
     colorWipe(strip.Color(0, 0, 255), 0);
     
-    Serial.println("Bing bong");
+    Serial.println(F("Bing bong"));
 
     digitalWrite(DOORBELL_ALARM_PIN, LOW);
 
@@ -984,15 +888,58 @@ void monitorDoorbell() {
 
 
 /* ========================================================================== *
+ *  Serial handling
+ * ========================================================================== */
+
+// call to process serial, will return non-zero value if it gets a query reply
+uint8_t handleSerial() {
+  uint8_t flags = 0;
+  
+  while (ESPSerial.available()) {
+    char inChar = (char)ESPSerial.read();
+    if (inChar == '\n') {
+      stringComplete = true;
+    } else if (inChar != '\r') {
+      inputChars++;
+      if (inputChars < MAXINPUTCHARS) {
+        inputString += inChar;
+      }
+    }
+  
+    if (stringComplete) {
+      Serial.print("ESP:");
+      Serial.println(inputString);    
+  
+      // reply to query?
+      if (inputString[0] == '?') {
+        // look at second character to see if door should open!
+        flags = (uint8_t)inputString[1] - 48;  // convert from ascii representation
+      } else if (inputString[0] == '~') {
+        // received reply to heartbeat
+        lastHB = millis();
+      } else {
+        
+      }
+      
+      // clear the string:
+      inputChars = 0;
+      inputString = "";
+      stringComplete = false;
+    }
+
+    // reset watchdog
+    wdt_reset();
+
+  }
+  return flags;
+}
+
+
+/* ========================================================================== *
  *  Setup
  * ========================================================================== */
 
 void setup(void) {
-  // clear any stored wifi config
-  WiFi.disconnect(true);
-  WiFi.softAPdisconnect();
-  WiFi.setAutoReconnect(false);
-
   // configure pins
   pinMode(BUILTIN_LED, OUTPUT);
   pinMode(PN532_RESET_PIN, OUTPUT);
@@ -1001,65 +948,70 @@ void setup(void) {
   pinMode(OUTPUT_PIN, OUTPUT);
   pinMode(EXIT_BUTTON_PIN, INPUT_PULLUP);
   digitalWrite(EXIT_BUTTON_PIN, HIGH);
+  pinMode(ESP_RESET_PIN, OUTPUT);
 
-  //attachInterrupt(digitalPinToInterrupt(PN532_IRQ_PIN), cardAvailable, CHANGE);
-
-  // make sure door is locked
-  lockDoor();
-
-  // start serial
-  Serial.begin(115200);
-
-  Serial.setDebugOutput(true);
-
-  Serial.println("");
-  Serial.println("Door Controller");
-  Serial.print("V:");  Serial.println(VERSION);
-
-  Serial.println("Listening for exit button...");
-  attachInterrupt(digitalPinToInterrupt(EXIT_BUTTON_PIN), exitButtonISR, FALLING);
-
-  // Start PN532
-  Serial.println("Connecting to PN532...");
-  resetPN532();
-
-  // init EEPROM and load cache
-  initCache();
-
-  Serial.println("Starting fancy LEDs...");
-  strip.begin();
-  strip.show(); // Initialize all pixels to 'off'
-
-  // Setup scheduler
-  Serial.println("Configuring tasks...");
-  runner.init();
-  runner.addTask(WifiConnectionTask);
-  runner.addTask(lookForCardTask);
-  runner.addTask(displayUptimeTask);
-  runner.addTask(syncCacheTask);
-  runner.addTask(monitorOutputTask);
-  runner.addTask(RFIDConnectionTask);
-  runner.addTask(monitorExitButtonTask);
-  runner.addTask(monitorDoorSensorTask);
-
-  // Enable tasks
-  WifiConnectionTask.enableDelayed(30000);  // enough time to open the door before potential watchdog reset
-  RFIDConnectionTask.enable();
-  lookForCardTask.enable();
-  displayUptimeTask.enable();
-  syncCacheTask.enable();
-  monitorOutputTask.enable();
-  monitorExitButtonTask.enable();
-  monitorDoorSensorTask.enable();
-
-  Serial.println("Ready");
-  Serial.println();
-  
+  // reset ESP on start
+  resetESP();
 
   // doorbell
   pinMode(DOORBELL_PIN, INPUT);
   pinMode(DOORBELL_ALARM_PIN, OUTPUT);
   digitalWrite(DOORBELL_ALARM_PIN, HIGH);
+
+  //attachInterrupt(digitalPinToInterrupt(PN532_IRQ_PIN), cardAvailable, CHANGE);
+
+  inputString.reserve(MAXINPUTCHARS);
+
+  // make sure door is locked
+  lockDoor();
+
+  // start serial
+  Serial.begin(9600);
+
+  Serial.println();
+  Serial.println(F("Door Controller"));
+  Serial.print("V:");  Serial.println(VERSION);
+
+  Serial.println(F("Listening for exit button..."));
+  attachInterrupt(digitalPinToInterrupt(EXIT_BUTTON_PIN), exitButtonISR, FALLING);
+
+  // Start PN532
+  Serial.println(F("Connecting to PN532..."));
+  resetPN532();
+
+  // init EEPROM and load cache
+  initCache();
+
+  Serial.println(F("Starting fancy LEDs..."));
+  strip.begin();
+  colorWipe(strip.Color(80, 80, 80), 50);
+
+  Serial.println(F("Connecting to ESP..."));
+  ESPSerial.begin(9600);
+
+  // Setup scheduler
+  Serial.println(F("Configuring tasks..."));
+  runner.init();
+  runner.addTask(ESPConnectionTask);
+  //runner.addTask(lookForCardTask);
+  runner.addTask(displayUptimeTask);
+  runner.addTask(syncCacheTask);
+  runner.addTask(RFIDConnectionTask);
+  //runner.addTask(monitorDoorSensorTask);
+
+  // Enable tasks
+  ESPConnectionTask.enable();
+  RFIDConnectionTask.enable();
+  //lookForCardTask.enableDelayed(500);
+  displayUptimeTask.enable();
+  syncCacheTask.enable();
+  //monitorDoorSensorTask.enable();
+
+  Serial.println(F("Ready"));
+  Serial.println();
+
+  // enable watchdog, 8 sec timeout
+  wdt_enable(WDTO_8S);
 }
 
 
@@ -1071,22 +1023,28 @@ void loop(void) {
   // execute tasks
   runner.execute();
 
+  lookForCard();
+  monitorDoorSensor();
+
   // keep track of uptime
-  uptime(false);
+  uptime(Serial, false);
+
+  // TODO: Apply fix for millis overflows around 49 days
 
   // TODO:
   // I've rebooted log msg
   // send heartbeat to server - 10min?
 
-  // TODO: stick these in tasks
   animation();
+  monitorOutput();
   monitorDoorbell();
+  monitorExitButton();
+
+  handleSerial();
   
   // visual comfort
   digitalWrite(BUILTIN_LED, !digitalRead(BUILTIN_LED));
 
-  Serial.println(ESP.getFreeHeap());
-
-  // just in case
-  yield();
+  // reset watchdog
+  wdt_reset();
 }
