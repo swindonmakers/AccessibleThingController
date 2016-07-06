@@ -11,6 +11,12 @@
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
 
+#define ENABLE_BUILTIN_BADGES
+
+#ifdef ENABLE_BUILTIN_BADGES
+  #include "builtinBadges.h"
+#endif
+
 /* ========================================================================== *
  *  Pinout
  * ========================================================================== */
@@ -412,6 +418,14 @@ TOKEN_CACHE_ITEM* addTokenToCache(TOKEN* token, uint8_t length, uint8_t flags) {
   uint8_t pos = cacheSize;
   uint8_t i;
 
+  // check for existing
+  TOKEN_CACHE_ITEM* t = getTokenFromCache(token, length);
+  if (t != NULL) {
+    // update flags
+    t->flags = flags;
+    return t;
+  }
+
   // else, find item with least scans
   if (cacheSize == CACHE_SIZE) {
     cacheSize = 0;  // start at the beginning
@@ -501,6 +515,14 @@ void initCache() {
 
     addr += 9;
   }
+
+#ifdef ENABLE_BUILTIN_BADGES
+  TOKEN *token;
+  for (i=0; i < BUILTIN_BADGE_COUNT; i++) {
+    token = (TOKEN*)&builtinBadges[i];
+    addTokenToCache(token, 4, 3);
+  }
+#endif
 }
 
 // task to update permission flags in cache, e.g. if someones access has changed
@@ -863,10 +885,10 @@ void monitorExitButton() {
  * ========================================================================== */
 
 void monitorDoorbell() {
-  int sensorValue = analogRead(DOORBELL_PIN);
+  boolean bellPressed = !digitalRead(DOORBELL_PIN);
 
   // turn doorbell on?
-  if (sensorValue < 500) {
+  if (bellPressed) {
     colorWipe(strip.Color(0, 0, 255), 0);
     
     Serial.println(F("Bing bong"));
@@ -954,7 +976,7 @@ void setup(void) {
   resetESP();
 
   // doorbell
-  pinMode(DOORBELL_PIN, INPUT);
+  pinMode(DOORBELL_PIN, INPUT_PULLUP);
   pinMode(DOORBELL_ALARM_PIN, OUTPUT);
   digitalWrite(DOORBELL_ALARM_PIN, HIGH);
 

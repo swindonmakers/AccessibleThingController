@@ -260,10 +260,15 @@ uint8_t queryServer(String cardID) {
   
        // Test if parsing succeeds.
        if (!root.success()) {
-         //Serial.println("Error: Couldn't parse JSON");
+         Serial.println("Error: Couldn't parse JSON");
          return TOKEN_ERROR;
        }
-  
+
+       if (!root.containsKey("access")) {
+         Serial.println("Error: No access info");
+         return TOKEN_ERROR;
+       }
+       
        // Check json response for access permission
        if (root["access"] == 1) {
          flags |= TOKEN_ACCESS;
