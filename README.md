@@ -19,3 +19,9 @@ Projects
 * doorController - code running an Arduino Pro Mini for the door.
 * thingWifi - code running on an ESP8266-01 for the door.
 * thingController - "abandoned" door controller code for a NodeMCU (not reliable / stable enough)
+* machineController - code for a NodeMCU for controlling access to machines [see](https://github.com/swindonmakers/AccessibleThingController/wiki/Machine-Access-Controller)
+
+Custom Libraries
+================
+* AccessSystem - wrapper for api calls to the AccessSystem Pi
+* TokenCache - an EEPROM based cache for access tokens
