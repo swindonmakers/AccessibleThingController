@@ -48,6 +48,9 @@ void AccessSystem::sendLogMsg(String msg)
 uint8_t AccessSystem::getAccess(String cardID) 
 {
     Serial.print("getAccess:");
+    Serial.print(ACCESS_SYSTEM_HOST);
+    Serial.print(":");
+    Serial.print(ACCESS_SYSTEM_PORT);
     uint8_t flags = 0;
  
     // check if connected
@@ -96,6 +99,8 @@ uint8_t AccessSystem::getAccess(String cardID)
           if (json == "") endOfHeaders = true;
         }
    
+        Serial.println(json);
+
         StaticJsonBuffer<200> jsonBuffer;
    
         JsonObject& root = jsonBuffer.parseObject(json);
