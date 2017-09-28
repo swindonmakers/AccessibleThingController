@@ -5,24 +5,38 @@ TokenCache::TokenCache(AccessSystem accessSystem) :
   accessSystem(accessSystem)
 { }
 
+void TokenCache::printHex(const uint8_t *data, const uint8_t numBytes	) {
+  const char * hex = "0123456789abcdef";
+  for (uint8_t i = 0; i < numBytes; i++) {
+    Serial.print(hex[data[i]>>4 & 0xF]);
+    Serial.print(hex[data[i] & 0xF]);
+  }
+}
+
 // Get cache item, or query server if not in cache
 TOKEN_CACHE_ITEM* TokenCache::fetch(TOKEN* uid, uint8_t uidLength, String tokenStr) {
 
   TOKEN_CACHE_ITEM* item = NULL;
   
+  Serial.print(F("Fetch token from cache: "));
+  printHex(*uid, uidLength);
+
   // check cache
   item = get(uid, uidLength);
   
   if (item != NULL) {
-    // check it's valid
+    Serial.println(F(" :found in cache"));
+
     if (item->flags == 0) {
+        // remove if invalid (shouldn't be there in the first place)
         remove(item);
         item = NULL;
     }
   }
 
-  // not found, query server and add to cache if has permission
+  // not found so far, query server and add to cache if has permission
   if (item == NULL) {
+    Serial.println(F(" :not found in cache"));
     uint8_t flags = accessSystem.getAccess(tokenStr);
 
     if ((flags > 0) && (flags != TOKEN_ERROR)) {
@@ -110,7 +124,9 @@ TOKEN_CACHE_ITEM* TokenCache::get(TOKEN* token, uint8_t length) {
   void TokenCache::init() {
     Serial.println(F("Loading cache from EEPROM..."));
   
-    EEPROM.begin(512);
+#if defined(ESP8266)
+    EEPROM.begin(4096);
+#endif
   
     // read magic
     if (EEPROM.read(0) != EEPROM_MAGIC) {
@@ -219,6 +235,9 @@ void TokenCache::syncEEPROM() {
   }
 
   if (changed) {
+#if defined(ESP8266)
+    EEPROM.commit();
+#endif
     Serial.println(F("Updated EEPROM"));
   }
 }

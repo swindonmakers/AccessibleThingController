@@ -66,7 +66,6 @@ private:
     // update a byte of EEPROM memory, return true if changed
     bool updateEEPROM(int address, uint8_t value) {
       boolean changed = EEPROM.read(address) != value;
-      // TODO: rework for Arduino EEPROM
       if (changed) {
         EEPROM.write(address, value);
       }
@@ -84,6 +83,7 @@ public:
     void remove(TOKEN_CACHE_ITEM* item);
     void init();
     void sync();
+    void printHex(const uint8_t *data, const uint8_t numbytes);
 };
 
 #endif
