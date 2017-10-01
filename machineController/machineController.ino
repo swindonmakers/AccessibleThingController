@@ -41,7 +41,19 @@
 #define WIFI_SSID "swindon-makerspace"
 #define WIFI_PWD "makeallthethings"
 #define THING_ID "1"
-#define ACTIVE_TIME_MS 5000
+
+// Time the machine stays on for once the card is removed from the reader
+#define ACTIVE_TIME_MS 10000
+// Time at which machine starts a stage 1 timeout alert (slow short beep)
+#define PREWARN1_TIME_MS 5000
+#define PREWARN1_BEEP_INTERVAL 1000
+#define PREWARN1_BEEP_DURATION 25
+// Time at which machine starts a stage 2 timeout alert (fast middling beep)
+#define PREWARN2_TIME_MS 7500
+#define PREWARN2_BEEP_INTERVAL 500
+#define PREWARN2_BEEP_DURATION 250
+// Time at which machine starts a stage 3 timeout alert (continuous beep)
+#define PREWARN3_TIME_MS 9000
 
 // Pin Defines
 #define PIN_RELAY D3
@@ -68,6 +80,8 @@ unsigned long lastOn = 0;
 // ActivityLED - blink red led if nothing happening
 #define LED_BOUNCE_DELAY 500
 unsigned long lastLedBounce = 0;
+
+unsigned long lastTimeoutBeep = 0;
 
 void relayOff()
 {
@@ -182,6 +196,7 @@ void loop()
 
     if (cardReader.check()) {
         if (isRelayOff()) {
+            Serial.println(F("Machine off, new card presented"));
             beep(50);
             redOff();
         }
@@ -197,10 +212,12 @@ void loop()
                     Serial.print(F("Permission granted: "));
                     Serial.println(item->count);
                     // TODO: log to sever that user has activated machine
-                    greenOn();
                     relayOn();
                 }
-                // If the relay is already on, no need to beep / turn on, just extend time
+                // If the relay is already on, no need to beep / turn on, 
+                // just extend time, make sure buzzer is off and led is on
+                greenOn();
+                buzzerOff();
                 lastOn = millis();
             }
             else
@@ -229,17 +246,43 @@ void loop()
     }
 
     // TODO: see if two valid users can hand over the machine keeping it on
-    // TODO: define how long the machine should stay on for
-    // TODO: alert the user with audible timeout before their time expires
-    //         i.e. via a steadily quickening buzz-buzz noise and flashing of LED
     // TODO: work out how to do an early power-down of the machine - ie. user 
     //          wants to stop using the machine before the time is up.
     //          Maybe we need a button for this...?
-    if (millis() - lastOn > ACTIVE_TIME_MS){
-        greenOff();
-        relayOff();
-        // TODO: log that machine has been powered down
+    if (isRelayOn()) {
+        if (millis() - lastOn > ACTIVE_TIME_MS){
+            Serial.println(F("Time up, turning machine off"));
+            greenOff();
+            buzzerOff();
+            relayOff();
+            // TODO: log that machine has been powered down
+
+        } else if (millis() - lastOn > PREWARN3_TIME_MS && millis()) {
+            // Make sure we only trigger prewarn3 once by checking lastTimeoutBeep != 0
+            // Note we do this in a sub-if, rather than in the else-if to stop 2 triggering.
+            if (lastTimeoutBeep != 0) {
+                Serial.println(F("Prewarn 3 triggered"));
+                greenOff();
+                buzzerOn();
+                lastTimeoutBeep = 0;
+            }
+
+        } else if (millis() - lastOn > PREWARN2_TIME_MS && millis() - lastTimeoutBeep > PREWARN2_BEEP_INTERVAL) {
+            Serial.println(F("Prewarn 2 triggered"));
+            greenOff();
+            beep(PREWARN2_BEEP_DURATION);
+            greenOn();
+            lastTimeoutBeep = millis();
+
+        } else if (millis() - lastOn > PREWARN1_TIME_MS && millis() - lastTimeoutBeep > PREWARN1_BEEP_INTERVAL) {
+            Serial.println(F("Prewarn 1 triggered"));
+            greenOff();
+            beep(PREWARN1_BEEP_DURATION);
+            greenOn();
+            lastTimeoutBeep = millis();
+        }
     }
+
 
     // Gently blink RED led to indicate controller is alive
     if (millis() - lastLedBounce > LED_BOUNCE_DELAY) {
