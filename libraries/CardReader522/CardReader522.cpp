@@ -21,7 +21,7 @@ bool CardReader522::check()
   }
 
   // Check card reader
-  if (millis() > cardreaderLastCheck + CARDREADER_CHECK_INTERVAL_MS) {
+  if (millis() > cardreaderLastCheck + CARDREADER_CHECK_INTERVAL_MS && lastToken=="") {
 
     // Init the reader on every call to make sure its working correctly.
     // Checking version first doesn't seem a reliable way to test if its working

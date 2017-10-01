@@ -7,7 +7,7 @@
     - NodeMCU
     - RC522 RFID card reader
     - 240V 10A Relay module
-    - RGB LED (for status feedback)
+    - LED's (for status feedback)
     - Active buzzer (for audibile feedback at timeout / timeup)
 
 == Connections ==
@@ -23,15 +23,15 @@
     - 3.3V -> 3.3V
 
     Relay -> NodeMCU pin
-    - In   -> D8
+    - In   -> D3
 
-    RGB LED -> NodeMCU pin
+    LEDs -> NodeMCU pin 
+    (Pin HIGH = LED on: Pin -> LED -> Resistor -> GND)
     - R -> D1
     - G -> D2
-    - B -> D3
 
     Active Buzzer -> NodeMCU pin
-    - +ve -> A0
+    - +ve -> D8
     - -ve -> GND
 
 */
@@ -44,11 +44,11 @@
 #define ACTIVE_TIME_MS 5000
 
 // Pin Defines
-#define PIN_RELAY D8
+#define PIN_RELAY D3
 #define PIN_LED_R D1
 #define PIN_LED_G D2
-#define PIN_LED_B D3
-#define PIN_BUZZER A0
+#define PIN_BUZZER D8
+#define PIN_BUTTON 10 //?
 
 // Includes
 #include <ESP8266WiFi.h>
@@ -65,10 +65,16 @@ CardReader522 cardReader;
 TOKEN_CACHE_ITEM* item;
 unsigned long lastOn = 0;
 
+// ActivityLED - blink red led if nothing happening
+#define LED_BOUNCE_DELAY 500
+unsigned long lastLedBounce = 0;
+
 void relayOff()
 {
-    Serial.println(F("Turning relay off"));
-    digitalWrite(PIN_RELAY, HIGH);
+    if (digitalRead(PIN_RELAY) == LOW) {
+        Serial.println(F("Turning relay off"));
+        digitalWrite(PIN_RELAY, HIGH);
+    }
 }
 
 void relayOn()
@@ -77,28 +83,92 @@ void relayOn()
     digitalWrite(PIN_RELAY, LOW);
 }
 
+bool isRelayOn()
+{
+    return digitalRead(PIN_RELAY)  == LOW;
+}
+
+bool isRelayOff()
+{
+    return !isRelayOn();
+}
+
+void redOn()
+{
+    digitalWrite(PIN_LED_R, HIGH);
+}
+
+void redOff()
+{
+    digitalWrite(PIN_LED_R, LOW);
+}
+
+void redAlternate()
+{
+    digitalWrite(PIN_LED_R, !digitalRead(PIN_LED_R));
+}
+
+void greenOn()
+{
+    digitalWrite(PIN_LED_G, HIGH);
+}
+
+void greenOff()
+{
+    digitalWrite(PIN_LED_G, LOW);
+}
+
+
+void buzzerOn()
+{
+    digitalWrite(PIN_BUZZER, HIGH);
+}
+
+void buzzerOff()
+{
+    digitalWrite(PIN_BUZZER, LOW);
+}
+
+void beep(int ms)
+{
+    buzzerOn();
+    delay(ms);
+    buzzerOff();
+}
+
 void setup()
 {
+    // Init Serial
     Serial.begin(115200);
     Serial.println(F("Machine controller v1"));
+    Serial.println(F("Starting..."));
     
+    // Set pin modes
     pinMode(PIN_RELAY, OUTPUT);
     pinMode(PIN_LED_R, OUTPUT);
     pinMode(PIN_LED_G, OUTPUT);
-    pinMode(PIN_LED_B, OUTPUT);
     pinMode(PIN_BUZZER, OUTPUT);
 
+    // Set initial pin states
     relayOff();
+    redOff();
+    greenOff();
+    beep(500);
 
-    Serial.println(F("Init..."));
+    // Init helpers & hardware
     cardReader.init();
     tokenCache.init();
 
+    // Connect to wifi
+    // TODO: move wifi connection to main loop to facilitate reconnect
     Serial.print(F("Connecting wifi"));
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PWD);
     while(WiFi.status() != WL_CONNECTED) {
         Serial.print(F("."));
+        redOn();
+        beep(10);
+        redOff();
         delay(500);
     }
     Serial.println(F("Connected"));
@@ -111,45 +181,69 @@ void loop()
     // TODO: make sure wifi stays connected (should be in a resuable library)
 
     if (cardReader.check()) {
+        if (isRelayOff()) {
+            beep(50);
+            redOff();
+        }
 
         item = tokenCache.fetch(&cardReader.lastUID, cardReader.lastLen, cardReader.lastToken);
         
         if (item != NULL) {
             if (item->flags && TOKEN_ACCESS) {
-                // Permission granted, so open/power the machine
-                item->count++;
+                if (isRelayOff()) {
+                    // Permission granted, so open/power the machine
+                    item->count++;
 
-                Serial.print(F("Permission granted: "));
-                Serial.println(item->count);
-                // TODO: log to sever that user has activated machine
-                // TODO: change LED to tell user machine is powered
-                relayOn();
+                    Serial.print(F("Permission granted: "));
+                    Serial.println(item->count);
+                    // TODO: log to sever that user has activated machine
+                    greenOn();
+                    relayOn();
+                }
+                // If the relay is already on, no need to beep / turn on, just extend time
                 lastOn = millis();
             }
             else
             {
                 Serial.println(F("Permission denied."));
+                relayOff();
+                redOn();
+                beep(2000);
+                redOff();
                 // TODO: log to server that user has tried to use machine, but access denied
-                // TODO: change LED to tell user access denied
             }
         }
         else
         {
             Serial.println(F("Token not found"));
+            relayOff();
+            redOn();
+            beep(500);
+            redOff();
+            delay(500);
+            redOn();
+            beep(1500);
+            redOff();
             // TODO: log to server that user has tried to use machine, but token not found
-            // TODO: change LED to tell user token not found
         }
     }
 
+    // TODO: see if two valid users can hand over the machine keeping it on
     // TODO: define how long the machine should stay on for
     // TODO: alert the user with audible timeout before their time expires
     //         i.e. via a steadily quickening buzz-buzz noise and flashing of LED
-    // TODO: check that leaving a card on the reader means the machine stays on
     // TODO: work out how to do an early power-down of the machine - ie. user 
     //          wants to stop using the machine before the time is up.
     //          Maybe we need a button for this...?
-    // TODO: log that machine has been powered down
     if (millis() - lastOn > ACTIVE_TIME_MS){
+        greenOff();
         relayOff();
+        // TODO: log that machine has been powered down
+    }
+
+    // Gently blink RED led to indicate controller is alive
+    if (millis() - lastLedBounce > LED_BOUNCE_DELAY) {
+        redAlternate();
+        lastLedBounce = millis();
     }
 }
