@@ -251,7 +251,7 @@ void loop()
             else
             {
                 Serial.println(F("Permission denied."));
-                relayOff();
+                turnOffMachine();
                 redOn();
                 beep(2000);
                 redOff();
@@ -261,7 +261,7 @@ void loop()
         else
         {
             Serial.println(F("Token not found"));
-            relayOff();
+            turnOffMachine();
             redOn();
             beep(500);
             redOff();
