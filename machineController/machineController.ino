@@ -3,6 +3,9 @@
     Machine controller code, used for access to control to
     an arbitrary "machine" (eg lathe, mill, 3d printer, etc)
 
+== Behaviour ==
+    // TODO: document expected behaviour, i.e. "how this should work"
+
 == Hardware ==
     - NodeMCU
     - RC522 RFID card reader
@@ -34,6 +37,12 @@
     - +ve -> D8
     - -ve -> GND
 
+    Button that pulls A0 high when pressed
+    Note that because the button is on A0, you'll need to change the code
+    if you want to put in on a different pin because we can't digitalRead the
+    analogPin on an ESP
+    - A0
+
 */
 
 // Config
@@ -60,7 +69,7 @@
 #define PIN_LED_R D1
 #define PIN_LED_G D2
 #define PIN_BUZZER D8
-#define PIN_BUTTON 10 //?
+#define PIN_BUTTON A0
 
 // Includes
 #include <ESP8266WiFi.h>
@@ -78,10 +87,18 @@ TOKEN_CACHE_ITEM* item;
 unsigned long lastOn = 0;
 
 // ActivityLED - blink red led if nothing happening
-#define LED_BOUNCE_DELAY 500
-unsigned long lastLedBounce = 0;
+#define LED_TOGGLE_DELAY 500
+unsigned long lastLedToggle = 0;
 
+// last time we beeped about time nearly running out
 unsigned long lastTimeoutBeep = 0;
+
+// Button debounce variables
+int buttonState;   
+int lastButtonState = LOW;
+unsigned long buttonDebounceTime = 0;  
+unsigned long buttonDebounceDelay = 50;
+
 
 void relayOff()
 {
@@ -117,7 +134,7 @@ void redOff()
     digitalWrite(PIN_LED_R, LOW);
 }
 
-void redAlternate()
+void redToggle()
 {
     digitalWrite(PIN_LED_R, !digitalRead(PIN_LED_R));
 }
@@ -131,7 +148,6 @@ void greenOff()
 {
     digitalWrite(PIN_LED_G, LOW);
 }
-
 
 void buzzerOn()
 {
@@ -150,6 +166,16 @@ void beep(int ms)
     buzzerOff();
 }
 
+void turnOffMachine()
+{
+    greenOff();
+    buzzerOff();
+    relayOff();
+    lastOn = 0;
+    lastTimeoutBeep = 0;
+    // TODO: log that machine has been powered down
+}
+
 void setup()
 {
     // Init Serial
@@ -162,6 +188,7 @@ void setup()
     pinMode(PIN_LED_R, OUTPUT);
     pinMode(PIN_LED_G, OUTPUT);
     pinMode(PIN_BUZZER, OUTPUT);
+    pinMode(PIN_BUTTON, INPUT);
 
     // Set initial pin states
     relayOff();
@@ -194,9 +221,10 @@ void loop()
 {
     // TODO: make sure wifi stays connected (should be in a resuable library)
 
+    // Check card reader
     if (cardReader.check()) {
         if (isRelayOff()) {
-            Serial.println(F("Machine off, new card presented"));
+            Serial.println(F("Machine is off and a new card has been presented"));
             beep(50);
             redOff();
         }
@@ -245,17 +273,11 @@ void loop()
         }
     }
 
-    // TODO: see if two valid users can hand over the machine keeping it on
-    // TODO: work out how to do an early power-down of the machine - ie. user 
-    //          wants to stop using the machine before the time is up.
-    //          Maybe we need a button for this...?
+    // Check if we should be turning the machine off, or notifying the user time is nearly up
     if (isRelayOn()) {
         if (millis() - lastOn > ACTIVE_TIME_MS){
             Serial.println(F("Time up, turning machine off"));
-            greenOff();
-            buzzerOff();
-            relayOff();
-            // TODO: log that machine has been powered down
+            turnOffMachine();
 
         } else if (millis() - lastOn > PREWARN3_TIME_MS && millis()) {
             // Make sure we only trigger prewarn3 once by checking lastTimeoutBeep != 0
@@ -283,10 +305,26 @@ void loop()
         }
     }
 
+    // Check power-down button, debounce, etc.
+    int reading = analogRead(PIN_BUTTON) > 500 ? HIGH : LOW;
+    if (reading != lastButtonState) {
+        buttonDebounceTime = millis();
+    }
+    if (millis() - buttonDebounceTime > buttonDebounceDelay) {
+        if (reading != buttonState) {
+            buttonState = reading;
+            if (buttonState == HIGH) {
+                Serial.println(F("Machine off button pressed"));
+                turnOffMachine();
+            }
+        }
+    }
+    lastButtonState = reading;
+
 
     // Gently blink RED led to indicate controller is alive
-    if (millis() - lastLedBounce > LED_BOUNCE_DELAY) {
-        redAlternate();
-        lastLedBounce = millis();
+    if (millis() - lastLedToggle > LED_TOGGLE_DELAY) {
+        redToggle();
+        lastLedToggle = millis();
     }
 }
