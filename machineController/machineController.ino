@@ -321,6 +321,8 @@ void loop()
     }
     lastButtonState = reading;
 
+    // Allow the cache to sync
+    tokenCache.loop();
 
     // Gently blink RED led to indicate controller is alive
     if (millis() - lastLedToggle > LED_TOGGLE_DELAY) {

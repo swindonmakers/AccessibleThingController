@@ -5,6 +5,17 @@ TokenCache::TokenCache(AccessSystem accessSystem) :
   accessSystem(accessSystem)
 { }
 
+void TokenCache::loop()
+{
+  //if (millis() - lastSyncTime > 600000) {
+  if (millis() - lastSyncTime > 60000) {
+    // call sync every 10 mins, note that each token has a sync time that counts down
+    // so in reality tokens are synced much less than every 10 mins
+    sync();
+    lastSyncTime = millis();
+  }
+}
+
 void TokenCache::printHex(const uint8_t *data, const uint8_t numBytes	) {
   const char * hex = "0123456789abcdef";
   for (uint8_t i = 0; i < numBytes; i++) {
@@ -162,7 +173,11 @@ TOKEN_CACHE_ITEM* TokenCache::get(TOKEN* token, uint8_t length) {
       Serial.print(' ');
       Serial.print(tokenStr);
       Serial.print(':');
-      Serial.println(cache[i].flags);
+      Serial.print(cache[i].flags);
+      Serial.print(':');
+      Serial.print(cache[i].count);
+      Serial.print(':');
+      Serial.println(cache[i].sync);
   
       cache[i].count = 0;
       cache[i].sync = 1 + i;  // resync everything soon-ish
@@ -175,6 +190,7 @@ TOKEN_CACHE_ITEM* TokenCache::get(TOKEN* token, uint8_t length) {
   // called every 10min ish
   void TokenCache::sync() {
     // for each item in cache
+    Serial.println(F("Syncing cached tokens..."));
     uint8_t i;
     for (i=0; i<cacheSize; i++) {
       // dec sync counter
@@ -202,12 +218,15 @@ TOKEN_CACHE_ITEM* TokenCache::get(TOKEN* token, uint8_t length) {
           // else try again next cycle
           cache[i].sync = 1;
         }
-  
       }
+
+      yield();
     }
   
     // sync changes to EEPROM
     syncEEPROM();
+
+    Serial.println(F("Cache sync complete"));
   }
 
 // update EEPROM to match cache

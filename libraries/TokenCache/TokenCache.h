@@ -6,7 +6,7 @@
 #include <EEPROM.h>
 
 #define TOKEN_CACHE_SIZE        32
-#define TOKEN_CACHE_SYNC        240   // resync cache after <value> x 10 minutes
+#define TOKEN_CACHE_SYNC        144   // resync cache after <value> x 10 minutes
 #define EEPROM_MAGIC      3  // update to clear EEPROM on restart
 
 // tokens are 4 or 7-byte values, held in a fixed 7-byte array
@@ -40,6 +40,8 @@ private:
 
     // number of items in cache
     uint8_t cacheSize = 0;
+
+    unsigned long lastSyncTime = 0;
 
     // token as hex string
     char tokenStr[14];
@@ -83,6 +85,7 @@ public:
     void remove(TOKEN_CACHE_ITEM* item);
     void init();
     void sync();
+    void loop();
     void printHex(const uint8_t *data, const uint8_t numbytes);
 };
 
