@@ -7,8 +7,7 @@ TokenCache::TokenCache(AccessSystem accessSystem)
 
 void TokenCache::loop()
 {
-  //if (millis() - lastSyncTime > 600000) {
-  if (millis() - lastSyncTime > 60000) {
+  if (millis() - lastSyncTime > 600000) {
     // call sync every 10 mins, note that each token has a sync time that counts down
     // so in reality tokens are synced much less than every 10 mins
     sync();
