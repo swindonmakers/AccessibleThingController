@@ -45,25 +45,6 @@
 
 */
 
-// Config
-// TODO: maybe move this config into flash and add a (password protected) web UI to update it
-#define WIFI_SSID "swindon-makerspace"
-#define WIFI_PWD "makeallthethings"
-#define THING_ID "1"
-
-// Time the machine stays on for once the card is removed from the reader
-#define ACTIVE_TIME_MS 10000
-// Time at which machine starts a stage 1 timeout alert (slow short beep)
-#define PREWARN1_TIME_MS 5000
-#define PREWARN1_BEEP_INTERVAL 1000
-#define PREWARN1_BEEP_DURATION 25
-// Time at which machine starts a stage 2 timeout alert (fast middling beep)
-#define PREWARN2_TIME_MS 7500
-#define PREWARN2_BEEP_INTERVAL 500
-#define PREWARN2_BEEP_DURATION 250
-// Time at which machine starts a stage 3 timeout alert (continuous beep)
-#define PREWARN3_TIME_MS 9000
-
 // Pin Defines
 #define PIN_RELAY D3
 #define PIN_LED_R D1
@@ -72,6 +53,7 @@
 #define PIN_BUTTON A0
 
 // Includes
+#include "config.h"
 #include <ESP8266WiFi.h>
 #include <PingKeepAlive.h>
 #include <AccessSystem.h>
