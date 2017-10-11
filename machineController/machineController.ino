@@ -174,7 +174,7 @@ void turnOffMachine()
     relayOff();
     lastOn = 0;
     lastTimeoutBeep = 0;
-    // TODO: log that machine has been powered down
+    accessSystem.sendLogMsg("Machine powered down");
 }
 
 void setup()
@@ -214,7 +214,7 @@ void setup()
     }
     Serial.println(F("Connected"));
 
-    // TODO: log node startup to server
+    accessSystem.sendLogMsg("MachineController startup");
 }
 
 void loop()
@@ -237,7 +237,7 @@ void loop()
 
                     Serial.print(F("Permission granted: "));
                     Serial.println(item->count);
-                    // TODO: log to sever that user has activated machine
+                    accessSystem.sendLogMsg("Machine powered up by:" + cardReader.lastToken);
                     relayOn();
                 }
                 // If the relay is already on, no need to beep / turn on, 
@@ -253,7 +253,7 @@ void loop()
                 redOn();
                 beep(2000);
                 redOff();
-                // TODO: log to server that user has tried to use machine, but access denied
+                accessSystem.sendLogMsg("Machine access denied to:" + cardReader.lastToken);
             }
         }
         else
@@ -267,7 +267,7 @@ void loop()
             redOn();
             beep(1500);
             redOff();
-            // TODO: log to server that user has tried to use machine, but token not found
+            accessSystem.sendLogMsg("Machine access denied to unknown token:" + cardReader.lastToken);
         }
     }
 
