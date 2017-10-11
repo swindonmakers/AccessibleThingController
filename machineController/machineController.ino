@@ -4,7 +4,27 @@
     an arbitrary "machine" (eg lathe, mill, 3d printer, etc)
 
 == Behaviour ==
-    // TODO: document expected behaviour, i.e. "how this should work"
+    The machine controller should only allow valid users to power up restircted equipment.
+    
+    Features (functional)
+     - User may power on machine by presenting a valid access token
+     - User will be notified (by a beep and flashing led) if their token is invalid
+     - The machine will stay on for a configured length of time once the token is removed
+     - The controller will alert the user before their time is up by flashing an LED and beeping
+     - The user may re-present their token to extend their time
+     - The user may leave their token on the cardreader to make the machine stay on, upon removal
+          the user will have the configured timeout before the machine is powered down
+     - There is a button that the user can press to powerdown immediately if they are finished
+          with the machine before the timeout is up.
+
+    Features (non-functional)
+     - The controller will log (to the access system) when a user powers up a machine
+     - The controller will log when a machine powers down
+     - The controller will log when an unauthorised user tries to power up a machine
+     - Wifi connection should survive wifi access point restarts
+     - Use of the tokenCache should ensure that once a user has activated a machine they
+         should be able to continue to use that machine even if the access system / wifi
+         goes down for some reason.
 
 == Hardware ==
     - NodeMCU
