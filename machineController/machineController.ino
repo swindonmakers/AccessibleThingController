@@ -73,11 +73,13 @@
 
 // Includes
 #include <ESP8266WiFi.h>
+#include <PingKeepAlive.h>
 #include <AccessSystem.h>
 #include <TokenCache.h>
 #include <CardReader522.h>
 
 // Objects
+PingKeepAlive pka;
 AccessSystem accessSystem(THING_ID);
 TokenCache tokenCache(accessSystem);
 CardReader522 cardReader;
@@ -98,7 +100,6 @@ int buttonState;
 int lastButtonState = LOW;
 unsigned long buttonDebounceTime = 0;  
 unsigned long buttonDebounceDelay = 50;
-
 
 void relayOff()
 {
@@ -201,14 +202,13 @@ void setup()
     tokenCache.init();
 
     // Connect to wifi
-    // TODO: move wifi connection to main loop to facilitate reconnect
     Serial.print(F("Connecting wifi"));
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PWD);
     while(WiFi.status() != WL_CONNECTED) {
         Serial.print(F("."));
         redOn();
-        beep(10);
+        delay(100);
         redOff();
         delay(500);
     }
@@ -219,8 +219,6 @@ void setup()
 
 void loop()
 {
-    // TODO: make sure wifi stays connected (should be in a resuable library)
-
     // Check card reader
     if (cardReader.check()) {
         if (isRelayOff()) {
@@ -324,8 +322,11 @@ void loop()
     // Allow the cache to sync
     tokenCache.loop();
 
-    // Gently blink RED led to indicate controller is alive
-    if (millis() - lastLedToggle > LED_TOGGLE_DELAY) {
+    // Keep wifi alive
+    pka.loop();
+
+    // Gently blink RED led to indicate controller is alive and connected to wifi
+    if (millis() - lastLedToggle > LED_TOGGLE_DELAY && pka.isConnected) {
         redToggle();
         lastLedToggle = millis();
     }
