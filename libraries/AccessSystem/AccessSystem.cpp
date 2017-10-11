@@ -27,7 +27,7 @@ void AccessSystem::sendLogMsg(String msg)
     url += "msglog?thing=";
     url += thingId;
     url += "&msg=";
-    url += msg;
+    url += urlencode(msg);
  
     Serial.print(url);
  
