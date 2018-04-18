@@ -51,8 +51,8 @@
 
 #define OUTPUT_ENABLE_DURATION          10000 // milliseconds
 
-IPAddress ip(192,168,1,253);  //Node static IP
-IPAddress gateway(192,168,1,254);
+IPAddress ip(192,168,1,252);  //Node static IP
+IPAddress gateway(192,168,1,1);
 IPAddress subnet(255,255,255,0);
 
 /* ========================================================================== *
