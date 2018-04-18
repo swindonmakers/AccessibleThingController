@@ -1,5 +1,5 @@
-#include <pin_magic.h>
-#include <registers.h>
+//#include <pin_magic.h>
+//#include <registers.h>
 
 #include <Wire.h>
 #include <PN532_I2C.h>

@@ -16,9 +16,10 @@ PN532_I2C::PN532_I2C(TwoWire &wire, uint8_t SDAPin, uint8_t CLKPin)
 
 void PN532_I2C::begin()
 {
-    _wire->begin(_SDAPin , _CLKPin);  // data, clock
+    _wire->begin();
+    //_wire->begin(_SDAPin , _CLKPin);  // data, clock
     // ref issue: https://github.com/Seeed-Studio/PN532/issues/44
-    _wire->setClockStretchLimit(2000);
+    //_wire->setClockStretchLimit(2000);
 }
 
 void PN532_I2C::wakeup()
